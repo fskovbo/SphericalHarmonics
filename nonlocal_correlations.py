@@ -675,6 +675,184 @@ def mesh_volume_from_triangles(v: np.ndarray, f: np.ndarray):
     return volume
 
 
+def pair_bins_from_sources(D: np.ndarray,
+                           areas: np.ndarray,
+                           bin_edges: np.ndarray,
+                           sources: np.ndarray,
+                           use_area_weights: bool = True):
+    """
+    Construct pair bins (i,j) where i is restricted to a source set.
+
+    Args
+    ----
+    D : (N,N) ndarray
+        Symmetric distance matrix (vertex/cell geodesic distances).
+    areas : (N,) ndarray
+        Weights per element (vertex areas, cell patch areas, etc).
+    bin_edges : (B+1,) ndarray
+        Distance bin edges.
+    sources : (S,) ndarray of int
+        Indices of source elements (e.g. serotonin+ cells).
+    use_area_weights : bool
+        If True, pair weights = area[i]*area[j].
+        If False, weights = 1.
+
+    Returns
+    -------
+    bins_dict : dict
+        For each bin b:
+          - I_b : indices of sources in pairs
+          - J_b : indices of partner elements
+          - W_b : weights for each pair
+        Plus 'bin_edges'.
+    """
+    N = D.shape[0]
+    B = len(bin_edges) - 1
+    r_max = bin_edges[-1]
+
+    I_bins = [[] for _ in range(B)]
+    J_bins = [[] for _ in range(B)]
+    W_bins = [[] for _ in range(B)]
+
+    for i in sources:
+        ds = D[i, :]
+        js = np.arange(N)
+
+        mask = (ds <= r_max) & (js != i)  # exclude self
+        if not np.any(mask):
+            continue
+
+        ds2 = ds[mask]
+        js = js[mask]
+        bins = np.searchsorted(bin_edges, ds2, side='right') - 1
+        valid = (bins >= 0) & (bins < B)
+        bins = bins[valid]
+        js = js[valid]
+
+        if use_area_weights:
+            w = areas[i] * areas[js]
+        else:
+            w = np.ones_like(js, dtype=np.float32)
+
+        for b, j, wb in zip(bins, js, w):
+            I_bins[b].append(i)
+            J_bins[b].append(int(j))
+            W_bins[b].append(float(wb))
+
+    out = {'bin_edges': np.asarray(bin_edges)}
+    for b in range(B):
+        out[f'I_{b}'] = np.asarray(I_bins[b], dtype=np.int32)
+        out[f'J_{b}'] = np.asarray(J_bins[b], dtype=np.int32)
+        out[f'W_{b}'] = np.asarray(W_bins[b], dtype=np.float32)
+    return out
+
+
+def positive_indices_and_labels(X: np.ndarray):
+    """
+    For each column of X, return the row indices of positive entries,
+    and a binary (0/1) mask of the same shape as X.
+    
+    Parameters
+    ----------
+    X : np.ndarray
+        Input array (2D or higher, but column logic applies to last axis).
+    
+    Returns
+    -------
+    indices_per_col : list of np.ndarray
+        List of arrays, where indices_per_col[j] contains the row indices
+        of positive entries in column j.
+    labels : np.ndarray
+        Binary mask of the same shape as X (1 if >0, else 0).
+    """
+    # binary mask (0/1)
+    labels = (X > 0).astype(int)
+    
+    # handle only the first two axes for "rows" and "columns"
+    indices_per_col = [np.where(labels[:, j])[0] for j in range(X.shape[1])]
+    
+    return indices_per_col, labels
+
+
+def binary_seed_enrichment(bins_dict: dict,
+                           binary_labels: np.ndarray):
+    """
+    Compute seed-anchored enrichment of binary-labeled cells.
+
+    Args
+    ----
+    bins_dict : dict
+        Output from pair_bins_from_sources. Must contain:
+        - I_b, J_b, W_b for each bin
+        - 'bin_edges'
+    binary_labels : (N,) or (N,M) array of int or bool
+        0/1 array indicating whether each cell expresses the marker(s).
+        If 2D, each column is treated as a separate marker.
+
+    Returns
+    -------
+    enrichment : (B,M) array
+        Enrichment values E(r) = f_local(r) / f_global for each distance bin.
+    f_local : (B,M) array
+        Weighted local fraction of positives per bin.
+    f_global : (M,) array
+        Weighted global fraction of positives across all cells.
+    bin_centers : (B,) array
+        Midpoints of the distance bins.
+    Ns : (B,) array
+        Effective weighted counts (sum of weights) per bin.
+    """
+    bin_edges = bins_dict['bin_edges']
+    B = len(bin_edges) - 1
+
+    # Ensure labels are 2D: (N, M)
+    if binary_labels.ndim == 1:
+        binary_labels = binary_labels[:, None]
+    N, M = binary_labels.shape
+
+    f_local = np.zeros((B, M), dtype=np.float64)
+    Ns = np.zeros(B, dtype=np.float64)
+
+    # Compute local fractions in each bin
+    for b in range(B):
+        J_b = bins_dict[f'J_{b}']
+        W_b = bins_dict[f'W_{b}']
+        if len(J_b) == 0:
+            continue
+
+        lbls = binary_labels[J_b, :]   # (len(J_b), M)
+        w = W_b[:, None]               # (len(J_b), 1)
+
+        Ns[b] = np.sum(W_b)
+        if Ns[b] > 0:
+            f_local[b, :] = np.sum(w * lbls, axis=0) / Ns[b]
+
+    # Global fractions, weighted by areas (since areas are in weights)
+    total_w = np.zeros((N,), dtype=np.float64)
+    for b in range(B):
+        J_b = bins_dict[f'J_{b}']
+        W_b = bins_dict[f'W_{b}']
+        for j, w in zip(J_b, W_b):
+            total_w[j] += w
+
+    denom = np.sum(total_w)
+    if denom > 0:
+        f_global = (total_w[:, None] * binary_labels).sum(axis=0) / denom
+    else:
+        f_global = np.full(M, np.nan)
+
+    # Enrichment
+    enrichment = np.divide(f_local, f_global[None, :],
+                           out=np.full_like(f_local, np.nan),
+                           where=f_global[None, :] > 0)
+
+    # Bin centers
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+
+    return enrichment, f_local, f_global, bin_centers, Ns
+
+
+
 import numpy as np
 import cupy as cp
 from scipy.sparse.linalg import splu
