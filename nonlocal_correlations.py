@@ -557,6 +557,84 @@ def accumulate_correlations_from_bins(bins_dict, X: np.ndarray):
     return Cs, Ns
 
 
+def binary_seed_enrichment(bins_dict: dict,
+                           binary_labels: np.ndarray):
+    """
+    Compute seed-anchored enrichment of binary-labeled cells.
+
+    Args
+    ----
+    bins_dict : dict
+        Output from pair_bins_from_sources. Must contain:
+        - I_b, J_b, W_b for each bin
+        - 'bin_edges'
+    binary_labels : (N,) or (N,M) array of int or bool
+        0/1 array indicating whether each cell expresses the marker(s).
+        If 2D, each column is treated as a separate marker.
+
+    Returns
+    -------
+    enrichment : (B,M) array
+        Enrichment values E(r) = f_local(r) / f_global for each distance bin.
+    f_local : (B,M) array
+        Weighted local fraction of positives per bin.
+    f_global : (M,) array
+        Weighted global fraction of positives across all cells.
+    bin_centers : (B,) array
+        Midpoints of the distance bins.
+    Ns : (B,) array
+        Effective weighted counts (sum of weights) per bin.
+    """
+    bin_edges = bins_dict['bin_edges']
+    B = len(bin_edges) - 1
+
+    # Ensure labels are 2D: (N, M)
+    if binary_labels.ndim == 1:
+        binary_labels = binary_labels[:, None]
+    N, M = binary_labels.shape
+
+    f_local = np.zeros((B, M), dtype=np.float64)
+    Ns = np.zeros(B, dtype=np.float64)
+
+    # Compute local fractions in each bin
+    for b in range(B):
+        J_b = bins_dict[f'J_{b}']
+        W_b = bins_dict[f'W_{b}']
+        if len(J_b) == 0:
+            continue
+
+        lbls = binary_labels[J_b, :]   # (len(J_b), M)
+        w = W_b[:, None]               # (len(J_b), 1)
+
+        Ns[b] = np.sum(W_b)
+        if Ns[b] > 0:
+            f_local[b, :] = np.sum(w * lbls, axis=0) / Ns[b]
+
+    # Global fractions, weighted by areas (since areas are in weights)
+    total_w = np.zeros((N,), dtype=np.float64)
+    for b in range(B):
+        J_b = bins_dict[f'J_{b}']
+        W_b = bins_dict[f'W_{b}']
+        for j, w in zip(J_b, W_b):
+            total_w[j] += w
+
+    denom = np.sum(total_w)
+    if denom > 0:
+        f_global = (total_w[:, None] * binary_labels).sum(axis=0) / denom
+    else:
+        f_global = np.full(M, np.nan)
+
+    # Enrichment
+    enrichment = np.divide(f_local, f_global[None, :],
+                           out=np.full_like(f_local, np.nan),
+                           where=f_global[None, :] > 0)
+
+    # Bin centers
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+
+    return enrichment, f_local, f_global, bin_centers, Ns
+
+
 # ------------- Coarse graining methods -----------------------
 
 def remap_labels_to_contiguous(labels):
@@ -576,6 +654,43 @@ def remap_labels_to_contiguous(labels):
 
 
 def per_cell_stats_from_vertex_labels(v, f, vertex_areas, vertex_cell_labels, vertex_fields):
+    """
+    Compute per-cell statistics (centroid, area, averaged fields) 
+    from vertex-level data on a mesh.
+
+    This function aggregates vertex-level quantities (positions, areas, fields)
+    into cell-level statistics, where cells are defined by contiguous vertex labels.
+
+    Parameters
+    ----------
+    v : (V,3) ndarray
+        Vertex positions of the mesh.
+    f : (V,3) ndarray
+        Mesh faces (indices into v). Currently not used in computation,
+        but kept for consistency with mesh-related workflows.
+    vertex_areas : (V,) ndarray
+        Area associated with each vertex (e.g. Voronoi area).
+    vertex_cell_labels : (V,) ndarray of int
+        Cell label per vertex. Labels may be non-contiguous or contain -1
+        for vertices not assigned to any cell.
+    vertex_fields : (V,) ndarray or (V,F) ndarray
+        Scalar or multi-dimensional field values defined per vertex.
+
+    Returns
+    -------
+    centroids : (C,3) ndarray
+        Area-weighted centroid of each cell surface in 3D space.
+    cell_area_v : (C,) ndarray
+        Total area associated with each cell (sum of vertex areas).
+    fields : (C,F) ndarray
+        Area-weighted average of field values per cell.
+    valid : (C,) boolean ndarray
+        Mask indicating which cells had nonzero area (True = valid).
+    labels : (V,) ndarray
+        Contiguous cell labels per vertex, remapped from input labels.
+        Useful for indexing and correspondence.
+    """
+
     # remap labels first
     labels, mapping = remap_labels_to_contiguous(vertex_cell_labels)
     V = v.shape[0]
@@ -819,6 +934,52 @@ def anchored_radial_profile(bins_out: dict, field: np.ndarray):
 
     return bin_centers, mean_profile, stderr_profile
 
+
+def connected_and_normalized_correlations(Corr: np.ndarray, N: np.ndarray, X: np.ndarray):
+    """
+    Compute connected and normalized correlation functions.
+
+    Args
+    ----
+    Corr : ndarray, shape (B, F, F)
+        Raw correlation matrices per distance bin (output of accumulate_correlations_from_bins).
+    N : ndarray, shape (B,)
+        Normalization weights per distance bin (from accumulate_correlations_from_bins).
+    X : ndarray, shape (V, F)
+        Field values on vertices/cell centers (used to compute means and stds).
+
+    Returns
+    -------
+    Corr_conn : ndarray, shape (B, F, F)
+        Connected correlations: <F_i F_j> - <F_i><F_j>.
+    Corr_norm : ndarray, shape (B, F, F)
+        Connected + normalized correlations:
+            ( <F_i F_j> - <F_i><F_j> ) / (\sigma_i \sigma_j).
+    """
+    F = Corr.shape[1]
+
+    # --- global statistics for normalization ---
+    means = np.mean(X, axis=0)       # (F,)
+    vars_ = np.var(X, axis=0)        # (F,)
+    stds = np.sqrt(vars_ + 1e-12)    # avoid div-by-zero
+
+    # --- connected correlations ---
+    Corr_conn = np.copy(Corr)
+    for b in range(Corr.shape[0]):
+        if N[b] > 0:
+            Corr_conn[b] -= np.outer(means, means)
+        else:
+            Corr_conn[b] = np.full((F, F), np.nan)
+
+    # --- normalized connected correlations ---
+    Corr_norm = np.copy(Corr_conn)
+    for b in range(Corr.shape[0]):
+        if N[b] > 0:
+            Corr_norm[b] /= (np.outer(means, means) + 1e-12)
+        else:
+            Corr_norm[b] = np.full((F, F), np.nan)
+
+    return Corr_conn, Corr_norm
 
 
 import numpy as np
