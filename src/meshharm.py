@@ -146,7 +146,7 @@ class MeshHarm(SpHarm):
 
         mesh_path = path + '_transformed_mesh.obj'
         self.v, self.f = igl.read_triangle_mesh(mesh_path)
-        
+
 
 
 # Example usage:

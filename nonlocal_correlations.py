@@ -774,82 +774,50 @@ def positive_indices_and_labels(X: np.ndarray):
     return indices_per_col, labels
 
 
-def binary_seed_enrichment(bins_dict: dict,
-                           binary_labels: np.ndarray):
+def anchored_radial_profile(bins_out: dict, field: np.ndarray):
     """
-    Compute seed-anchored enrichment of binary-labeled cells.
+    Compute anchored radial profile of a continuous field
+    (e.g., curvature) around sources.
 
-    Args
-    ----
-    bins_dict : dict
-        Output from pair_bins_from_sources. Must contain:
-        - I_b, J_b, W_b for each bin
-        - 'bin_edges'
-    binary_labels : (N,) or (N,M) array of int or bool
-        0/1 array indicating whether each cell expresses the marker(s).
-        If 2D, each column is treated as a separate marker.
+    Parameters
+    ----------
+    bins_out : dict
+        Output from pair_bins_from_sources().
+    field : (N,) ndarray
+        Continuous field values (per vertex or per cell).
 
     Returns
     -------
-    enrichment : (B,M) array
-        Enrichment values E(r) = f_local(r) / f_global for each distance bin.
-    f_local : (B,M) array
-        Weighted local fraction of positives per bin.
-    f_global : (M,) array
-        Weighted global fraction of positives across all cells.
-    bin_centers : (B,) array
-        Midpoints of the distance bins.
-    Ns : (B,) array
-        Effective weighted counts (sum of weights) per bin.
+    bin_centers : (B,) ndarray
+        Midpoints of distance bins.
+    mean_profile : (B,) ndarray
+        Weighted average of field[j] per bin.
+    stderr_profile : (B,) ndarray
+        Weighted standard error per bin.
     """
-    bin_edges = bins_dict['bin_edges']
+    bin_edges = bins_out['bin_edges']
     B = len(bin_edges) - 1
-
-    # Ensure labels are 2D: (N, M)
-    if binary_labels.ndim == 1:
-        binary_labels = binary_labels[:, None]
-    N, M = binary_labels.shape
-
-    f_local = np.zeros((B, M), dtype=np.float64)
-    Ns = np.zeros(B, dtype=np.float64)
-
-    # Compute local fractions in each bin
-    for b in range(B):
-        J_b = bins_dict[f'J_{b}']
-        W_b = bins_dict[f'W_{b}']
-        if len(J_b) == 0:
-            continue
-
-        lbls = binary_labels[J_b, :]   # (len(J_b), M)
-        w = W_b[:, None]               # (len(J_b), 1)
-
-        Ns[b] = np.sum(W_b)
-        if Ns[b] > 0:
-            f_local[b, :] = np.sum(w * lbls, axis=0) / Ns[b]
-
-    # Global fractions, weighted by areas (since areas are in weights)
-    total_w = np.zeros((N,), dtype=np.float64)
-    for b in range(B):
-        J_b = bins_dict[f'J_{b}']
-        W_b = bins_dict[f'W_{b}']
-        for j, w in zip(J_b, W_b):
-            total_w[j] += w
-
-    denom = np.sum(total_w)
-    if denom > 0:
-        f_global = (total_w[:, None] * binary_labels).sum(axis=0) / denom
-    else:
-        f_global = np.full(M, np.nan)
-
-    # Enrichment
-    enrichment = np.divide(f_local, f_global[None, :],
-                           out=np.full_like(f_local, np.nan),
-                           where=f_global[None, :] > 0)
-
-    # Bin centers
     bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
 
-    return enrichment, f_local, f_global, bin_centers, Ns
+    mean_profile = np.full(B, np.nan)
+    stderr_profile = np.full(B, np.nan)
+
+    for b in range(B):
+        J_b = bins_out[f'J_{b}']
+        W_b = bins_out[f'W_{b}']
+        if len(J_b) == 0:
+            continue
+        values = field[J_b]
+        weights = W_b
+        mean_val = np.average(values, weights=weights)
+        # weighted standard error
+        var_val = np.average((values - mean_val)**2, weights=weights)
+        stderr = np.sqrt(var_val / len(values))
+
+        mean_profile[b] = mean_val
+        stderr_profile[b] = stderr
+
+    return bin_centers, mean_profile, stderr_profile
 
 
 

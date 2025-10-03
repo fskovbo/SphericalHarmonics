@@ -491,3 +491,100 @@ def permutation_test_cross_morans_I(X, Y, W, n_perms=999, seed=None):
     p_values = np.mean(np.abs(global_I_perm) >= np.abs(global_I_obs)[None, :, :], axis=0)
 
     return global_I_obs, local_I_obs, global_I_perm, p_values
+
+
+def local_field_statistics(field, marker_masks, G=None, k=0, areas=None):
+    """
+    Compute local statistics (mean, std, count) of one or more fields for multiple markers.
+    Can include k-nearest-neighbor aggregation along a graph.
+
+    Args
+    ----
+    field : (N,) or (N,F) ndarray
+        Continuous field(s) defined per cell.
+    marker_masks : (N,) or (N,M) ndarray of {0,1}
+        Binary masks indicating positive cells per marker.
+    G : networkx.Graph, optional
+        Cell adjacency graph for kNN aggregation. Only used if k>0.
+    k : int
+        Number of nearest neighbors along graph edges to include.
+    areas : (N,) ndarray, optional
+        Weights per cell (used only if k>0 and you want weighted averaging).
+
+    Returns
+    -------
+    means : (M,F) ndarray
+        Mean field per marker
+    stds : (M,F) ndarray
+        Std per marker
+    counts : (M,) ndarray
+        Number of cells considered per marker (excluding neighbors)
+    """
+
+    # Ensure field is 2D: (N, F)
+    field = np.atleast_2d(field)
+    if field.shape[0] == 1 and field.shape[1] != 1:
+        # shape (1, N) -> (N, 1)
+        field = field.T
+
+    # Ensure marker_masks is 2D: (N, M)
+    marker_masks = np.atleast_2d(marker_masks)
+    if marker_masks.shape[0] == 1 and marker_masks.shape[1] != 1:
+        marker_masks = marker_masks.T
+
+    N, F = field.shape
+    N2, M = marker_masks.shape
+    assert N == N2, "field and marker_masks must have same length"
+
+    means = np.zeros((M, F), dtype=float)
+    stds  = np.zeros((M, F), dtype=float)
+    counts = np.zeros(M, dtype=int)
+
+    if k > 0:
+        if G is None:
+            raise ValueError("G must be provided for kNN aggregation with k>0")
+        # Build adjacency list
+        idx = {n:i for i,n in enumerate(G.nodes())}
+        # Precompute neighbors up to k steps for each node
+        neighbors_list = []
+        for n in G.nodes():
+            visited = set([n])
+            frontier = set([n])
+            for step in range(k):
+                next_frontier = set()
+                for node in frontier:
+                    next_frontier.update(G.neighbors(node))
+                next_frontier -= visited
+                visited.update(next_frontier)
+                frontier = next_frontier
+                if not frontier:
+                    break
+            visited.remove(n)  # exclude self
+            neighbors_list.append([idx[nb] for nb in visited])
+        # neighbors_list[i] = list of neighbor indices for cell i
+
+        # Aggregate field over neighbors
+        field_agg = np.zeros_like(field)
+        for i in range(N):
+            if neighbors_list[i]:
+                neighbor_vals = field[neighbors_list[i]]
+                if areas is not None:
+                    weights = areas[neighbors_list[i]]
+                    field_agg[i] = np.average(neighbor_vals, axis=0, weights=weights)
+                else:
+                    field_agg[i] = neighbor_vals.mean(axis=0)
+            else:
+                field_agg[i] = field[i]
+        field = field_agg
+
+    for m in range(M):
+        mask = marker_masks[:, m] > 0
+        counts[m] = mask.sum()
+        if counts[m] > 0:
+            means[m, :] = field[mask].mean(axis=0)
+            stds[m, :]  = field[mask].std(axis=0)
+        else:
+            means[m, :] = np.nan
+            stds[m, :]  = np.nan
+
+    return means, stds, counts
