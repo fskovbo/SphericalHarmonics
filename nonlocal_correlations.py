@@ -79,45 +79,6 @@ def farthest_point_sampling(v: np.ndarray, k: int, seed: int = 0):
 
     return idx
 
-# ------------------------ Graph distances ---------------------------------
-
-def build_edge_graph(v: np.ndarray, f: np.ndarray) -> sparse.csr_matrix:
-    """Build symmetric adjacency (V x V) sparse matrix with Euclidean edge lengths as weights.
-    Only edges present in faces are added.
-    """
-    V = v.shape[0]
-    # collect edges
-    I = []
-    J = []
-    W = []
-    for tri in f:
-        for a, b in ((0,1),(1,2),(2,0)):
-            i = tri[a]; j = tri[b]
-            if i == j: continue
-            I.append(i); J.append(j)
-            W.append(np.linalg.norm(v[i]-v[j]))
-            # also add reverse
-            I.append(j); J.append(i)
-            W.append(np.linalg.norm(v[i]-v[j]))
-    A = sparse.csr_matrix((W, (I, J)), shape=(V, V))
-    # if multiple duplicate edges, keep smallest weight
-    A.data[np.isnan(A.data)] = 0.0
-    return A
-
-def geodesic_dijkstra_all_sources(edge_adj: sparse.spmatrix, sources: np.ndarray = None):
-    """Compute geodesic distances on mesh (edge-graph) from one or more sources.
-    Uses SciPy's csgraph.dijkstra. If sources is None, compute all-pairs distances
-    (be careful with memory for V>2000).
-
-    Returns: D (S x V) if sources provided, else (V x V)
-    """
-    if sources is None:
-        # all-pairs
-        D = csgraph.dijkstra(edge_adj, directed=False)
-        return D
-    else:
-        D = csgraph.dijkstra(edge_adj, directed=False, indices=sources)
-        return D
 
 
 # ------------------------ Diffusion distances -----------------------------
