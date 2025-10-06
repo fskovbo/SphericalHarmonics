@@ -538,8 +538,31 @@ class OrganoidMesh:
 
 
     # --------------------------------------------------------------------
-    # Geodesic distances (Heat method)
+    # Volume and per vertex/face areas
     # --------------------------------------------------------------------
+
+    def calc_mesh_volume(self) -> float:
+        """
+        Compute the total volume enclosed by the mesh using signed tetrahedra.
+
+        Returns
+        -------
+        volume : float
+            Absolute volume of the mesh.
+        """
+        # triangle vertex coordinates
+        tri = self.v[self.f]      # shape (F, 3, 3)
+        a = tri[:, 0, :]          # (F,3)
+        b = tri[:, 1, :]
+        c = tri[:, 2, :]
+
+        # vectorized cross and dot product for signed tetrahedron volumes
+        cross_ab = np.cross(a, b)               # (F,3)
+        tet_signed = np.einsum('ij,ij->i', cross_ab, c) / 6.0  # (F,)
+
+        volume = np.abs(np.sum(tet_signed))
+        return volume
+
 
     def calc_vertex_areas(self, from_mass_matrix: bool = True) -> np.ndarray:
         """
@@ -592,6 +615,9 @@ class OrganoidMesh:
         return face_areas
 
 
+    # --------------------------------------------------------------------
+    # Geodesic distances (Heat method)
+    # --------------------------------------------------------------------
 
     @staticmethod
     def _build_G_face(self):
@@ -617,9 +643,9 @@ class OrganoidMesh:
         return G_face
     
 
-    def calc_geodesics(self, vertex_areas=None, t=None, sources=None, use_cached=False):
+    def calc_geodesics(self, t=None, sources=None):
         """
-        Heat-method geodesic distances.
+        Compute approximate geodesic distances using the Heat Method (Crane et al. 2013).
         Returns D_out shape (S, V) distances from each source index in `sources` to all vertices.
 
         If vertex_areas is not provided, will compute face areas and distribute to vertices externally.
