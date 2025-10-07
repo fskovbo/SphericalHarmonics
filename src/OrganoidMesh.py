@@ -234,31 +234,6 @@ class OrganoidMesh:
         return coeffs_v, coeffs_fm
 
 
-    def compute_hks(self, t=[1, 5, 10], coeffs=True):
-        """
-        Compute Heat Kernel Signatures (HKS) at given diffusion times.
-        Optionally returns their Laplacian coefficients.
-
-        Parameters
-        ----------
-        t : list of float
-            Diffusion times for which to compute HKS.
-        coeffs : bool
-            If True, return HKS projected into Laplacian eigenbasis.
-        """
-        self._ensure_eigendecomposition()
-
-        hks = np.array([
-            np.einsum("i,ji->j", np.exp(-self.eigvals * ti), self.eigvecs ** 2)
-            for ti in t
-        ]).T
-
-        if coeffs:
-            coeffs_hks = self.eigvecs.T @ (self.mass_matrix @ hks)
-            return coeffs_hks
-        return hks
-
-
     def reconstruct_from_coeffs(self, coeffs, lmax=15):
         """
         Reconstruct spatial fields from their Laplacian coefficients up to lmax.
@@ -482,52 +457,57 @@ class OrganoidMesh:
         return unique_labels, centers_idx
 
 
-    def compute_cell_statistics(self, vertex_areas, vertex_cell_labels=None, vertex_fields=None):
+    def compute_cell_statistics(self, vertex_fields=None):
         """
-        Aggregate vertex-level data into per-cell statistics.
+        Aggregate vertex-level data into per-cell statistics using the mesh's
+        stored cell labels and vertex areas.
 
-        Args:
-          vertex_areas : (V,) area per vertex (e.g., voronoi)
-          vertex_cell_labels : (V,) int (if None, uses self.cell_label_field)
-          vertex_fields : (V,) or (V,F) continuous fields (if None, uses marker_fields if available)
+        Vertex areas are obtained from self.compute_vertex_areas().
+        Cell labels are taken from self.cell_label_field.
+        Marker fields can optionally be provided; if None, self.marker_fields is used.
 
-        Returns:
-          centroids : (C,3)
-          cell_area_v : (C,)
-          fields : (C,F)
-          valid : (C,) boolean
-          labels_contig : (V,) contiguous labels
+        Returns
+        -------
+        centroids : (C,3) ndarray
+            Area-weighted centroid of each cell.
+        cell_area_v : (C,) ndarray
+            Total area associated with each cell.
+        fields : (C,F) ndarray
+            Area-weighted average of each field per cell.
+        valid : (C,) boolean ndarray
+            True if cell has non-zero area.
+        labels_contig : (V,) ndarray
+            Contiguous cell labels per vertex.
         """
-        if vertex_cell_labels is None:
-            if self.cell_label_field is None:
-                raise ValueError("No vertex_cell_labels provided and self.cell_label_field is None")
-            vertex_cell_labels = self.cell_label_field
+
         if vertex_fields is None:
             if self.marker_fields is None:
-                raise ValueError("No vertex_fields provided and self.marker_fields is None")
+                raise ValueError("No vertex_fields provided and self.marker_fields is None.")
             vertex_fields = self.marker_fields
 
-        labels, mapping = self._remap_labels_to_contiguous(vertex_cell_labels)
-        V = self.v.shape[0]
+        # ensure vertex_fields is 2D
         vf = np.asarray(vertex_fields)
         if vf.ndim == 1:
             vf = vf[:, None]
-        C = int(labels.max() + 1) if (labels >= 0).any() else 0
+
+        V = self.v.shape[0]
+        C = int(self.cell_label_field.max() + 1) if (self.cell_label_field >= 0).any() else 0
+
+        # get vertex areas from the class method
+        vertex_areas = self.calc_vertex_areas()
 
         weighted_pos = np.zeros((C, 3), dtype=float)
         weighted_field = np.zeros((C, vf.shape[1]), dtype=float)
         cell_area_v = np.zeros(C, dtype=float)
-        counts = np.zeros(C, dtype=int)
 
         for idx in range(V):
-            lab = int(labels[idx])
+            lab = int(self.cell_label_field[idx])
             if lab < 0:
                 continue
             a = float(vertex_areas[idx])
             weighted_pos[lab] += a * self.v[idx]
             weighted_field[lab] += a * vf[idx]
             cell_area_v[lab] += a
-            counts[lab] += 1
 
         valid = cell_area_v > 0
         centroids = np.zeros((C, 3), dtype=float)
@@ -535,7 +515,8 @@ class OrganoidMesh:
         centroids[valid] = weighted_pos[valid] / cell_area_v[valid, None]
         fields[valid] = weighted_field[valid] / cell_area_v[valid, None]
 
-        return centroids, cell_area_v, fields, valid, labels
+        return centroids, cell_area_v, fields, valid, self.cell_label_field
+
 
 
     # --------------------------------------------------------------------
@@ -614,108 +595,6 @@ class OrganoidMesh:
             axis=1
         )
         return face_areas
-
-
-    # --------------------------------------------------------------------
-    # Geodesic distances (Heat method)
-    # --------------------------------------------------------------------
-
-    @staticmethod
-    def _build_G_face(self):
-        """
-        Build per-face gradients of barycentric basis functions:
-        returns G_face shape (F, 3, 3) such that G_face[k,a,:] = grad phi_a on face k.
-        """
-        tri = self.v[self.f]  # (F,3,3)
-        e1 = tri[:, 1] - tri[:, 0]
-        e2 = tri[:, 2] - tri[:, 0]
-        n = np.cross(e1, e2) # face normals (unnormalized)
-        dblA = np.linalg.norm(n, axis=1)
-        n_unit = n / (dblA[:, None] + 1e-20)
-
-        F = self.f.shape[0]
-        G_face = np.zeros((F, 3, 3), dtype=np.float64)
-
-        for a in range(3):
-            i1, i2 = (a + 1) % 3, (a + 2) % 3
-            edge = tri[:, i2] - tri[:, i1]
-            grad = np.cross(n_unit, edge) / (dblA[:, None] + 1e-20)
-            G_face[:, a, :] = grad
-        return G_face
-    
-
-    def calc_geodesics(self, t=None, sources=None):
-        """
-        Compute approximate geodesic distances using the Heat Method (Crane et al. 2013).
-        Returns D_out shape (S, V) distances from each source index in `sources` to all vertices.
-
-        If vertex_areas is not provided, will compute face areas and distribute to vertices externally.
-        """
-        if self.v is None or self.f is None:
-            raise RuntimeError("Mesh not set")
-
-        V = self.v.shape[0]
-        F = self.f.shape[0]
-
-        # ensure Laplacian and mass exist
-        if self.L is None or self.mass_matrix is None:
-            self.build_cotangent_laplacian_and_mass()
-
-        # precompute G_face and face areas
-        G_face = self._build_G_face()
-        face_areas = self.calc_face_areas()
-
-        # linear solver caching
-        reg = 1e-12
-        L_reg = self.L + reg * sparse.eye(V)
-        L_factor = splu(L_reg.tocsc())
-
-        # choose heat time t if not provided
-        if t is None:
-            # estimate mean edge length
-            edges = np.vstack([self.f[:, [0, 1]], self.f[:, [1, 2]], self.f[:, [2, 0]]])
-            edges = np.unique(np.sort(edges, axis=1), axis=0)
-            mean_edge = np.mean(np.linalg.norm(self.v[edges[:, 0]] - self.v[edges[:, 1]], axis=1))
-            t = mean_edge ** 2
-
-        A = (self.mass_matrix + t * self.L).tocsc()
-        A_factor = splu(A)
-
-        # sources default: all vertices
-        if sources is None:
-            sources = np.arange(V, dtype=int)
-        else:
-            sources = np.asarray(sources, dtype=int)
-
-        S = len(sources)
-        D_out = np.zeros((S, V), dtype=np.float64)
-
-        for si, s in enumerate(tqdm(sources, desc="heat-method sources")):
-            delta = np.zeros(V, dtype=np.float64)
-            delta[s] = 1.0
-            rhs = self.mass_matrix @ delta
-            u = A_factor.solve(rhs)  # heat solution
-
-            # face gradient: grad u = sum_a u[v_a] * grad phi_a
-            grad_u = np.einsum('ka,kai->ki', u[self.f], G_face)  # (F,3)
-
-            norms = np.linalg.norm(grad_u, axis=1)
-            norms[norms == 0] = 1e-12
-            X_face = -(grad_u.T / norms).T  # normalize and flip
-
-            # divergence at vertices: contrib = sum_face (X_face dot grad phi_a) * face_area
-            contrib = np.einsum('ki,kai->ka', X_face, G_face)
-            contrib *= face_areas[:, None]
-
-            div = np.zeros(V, dtype=np.float64)
-            for a in range(3):
-                np.add.at(div, self.f[:, a], contrib[:, a])
-
-            phi = L_factor.solve(div)
-            phi -= phi[s]
-            D_out[si, :] = phi
-
-        return D_out
 
 
     # -------------------------------------------------------------------------
