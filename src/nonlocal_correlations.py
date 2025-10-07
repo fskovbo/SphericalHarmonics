@@ -120,10 +120,11 @@ def compute_two_point_correlations(bins_dict: dict, X: np.ndarray):
     Parameters
     ----------
     bins_dict : dict
-        Output of pair_bins_from_distances().
+        Output of pair_bins_by_distance().
         Contains for each distance bin b:
-          - I_b, J_b : indices of pairs
-          - W_b : weights for each pair
+          - 'I_b': array of source indices
+          - 'J_b': array of partner indices
+          - 'W_b': array of pair weights
         Plus 'bin_edges'.
     X : (N, F) ndarray
         Field values at each discretization element (vertex, cell, etc).
@@ -137,83 +138,89 @@ def compute_two_point_correlations(bins_dict: dict, X: np.ndarray):
     Corr_conn : (B, F, F) ndarray
         Connected correlations: ⟨F_i F_j⟩ − ⟨F_i⟩⟨F_j⟩.
     Corr_norm : (B, F, F) ndarray
-        Connected + normalized correlations (Pearson-style):
-        (⟨F_i F_j⟩ − ⟨F_i⟩⟨F_j⟩) / (σ_i σ_j).
+        Connected + normalized correlations (Pearson-style).
     Ns : (B,) ndarray
         Normalization weights per distance bin.
 
     Notes
     -----
-    - This computes correlations of the form
-
-          C_b^{kl} = (1 / N_b) * sum_{(i,j) in bin b} W_ij * (F_i^k * F_j^l + F_j^k * F_i^l)
-
-      where F_i^k is the value of field k at vertex i,
-      W_ij = area[i] * area[j],
-      and N_b = 2 * sum_{(i,j) in bin b} W_ij.
-
-    - Connected correlations remove the global mean field contributions.
-    - Normalized correlations are dimensionless and comparable across datasets.
+    - Global means and variances are computed using the **same weights**
+      as the pair binning: each vertex contributes proportionally to the
+      sum of its pair weights across all bins.
     """
 
-    # --- Input validation ---
+    # Ensure X is 2D
     X = np.asarray(X)
     if X.ndim == 1:
         X = X[:, None]   # (N,) → (N,1)
+    N, F = X.shape
 
     bin_edges = bins_dict['bin_edges']
     B = len(bin_edges) - 1
-    N, F = X.shape
 
-    Cs = np.zeros((B, F, F), dtype=np.float64)
+    # --- Precompute raw correlations ---
+    Corr_raw = np.zeros((B, F, F), dtype=np.float64)
     Ns = np.zeros(B, dtype=np.float64)
 
-    # --- Compute raw two-point correlations ---
+    # Also accumulate weights per vertex for global mean calculation
+    vertex_weight_sum = np.zeros(N, dtype=np.float64)
+
     for b in range(B):
         I = bins_dict.get(f'I_{b}', np.zeros(0, dtype=np.int32))
         J = bins_dict.get(f'J_{b}', np.zeros(0, dtype=np.int32))
         W = bins_dict.get(f'W_{b}', np.zeros(0, dtype=np.float32))
+
         if I.size == 0:
-            Cs[b, :, :] = np.nan
+            Corr_raw[b, :, :] = np.nan
             continue
 
         A = X[I, :]
         Bv = X[J, :]
         w = W[:, None]
 
-        # symmetric correlation accumulation
-        Cs[b] += A.T @ (w * Bv) + Bv.T @ (w * A)
+        # symmetric accumulation
+        Corr_raw[b] += A.T @ (w * Bv) + Bv.T @ (w * A)
         Ns[b] += float(np.sum(W)) * 2.0
 
-    # --- Normalize each bin ---
+        # accumulate vertex weights for global statistics
+        np.add.at(vertex_weight_sum, I, W)
+        np.add.at(vertex_weight_sum, J, W)
+
     for b in range(B):
         if Ns[b] > 0:
-            Cs[b] /= Ns[b]
+            Corr_raw[b] /= Ns[b]
         else:
-            Cs[b, :, :] = np.nan
+            Corr_raw[b][:] = np.nan
 
-    # --- Compute connected and normalized correlations ---
-    means = np.mean(X, axis=0)       # (F,)
-    vars_ = np.var(X, axis=0)
+    # --- Compute global weighted means and variances ---
+    total_weight = np.sum(vertex_weight_sum)
+    if total_weight == 0:
+        raise ValueError("Total weight is zero — check bins_dict or fields.")
+
+    means = np.average(X, axis=0, weights=vertex_weight_sum)
+    vars_ = np.average((X - means)**2, axis=0, weights=vertex_weight_sum)
     stds = np.sqrt(vars_ + 1e-12)
 
-    Corr_conn = np.copy(Cs)
-    Corr_norm = np.copy(Cs)
+    # --- Connected and normalized correlations ---
+    Corr_conn = np.copy(Corr_raw)
+    Corr_norm = np.copy(Corr_raw)
+
+    outer_means = np.outer(means, means)
+    outer_stds = np.outer(stds, stds) + 1e-12
 
     for b in range(B):
         if Ns[b] > 0:
-            Corr_conn[b] -= np.outer(means, means)
-            Corr_norm[b] = Corr_conn[b] / (np.outer(stds, stds) + 1e-12)
+            Corr_conn[b] -= outer_means
+            Corr_norm[b] = Corr_conn[b] / outer_stds
         else:
             Corr_conn[b][:] = np.nan
             Corr_norm[b][:] = np.nan
 
-    return Cs, Corr_conn, Corr_norm, Ns
+    return Corr_raw, Corr_conn, Corr_norm, Ns
 
 
 
-def compute_anchored_enrichment(bins_dict: dict,
-                           binary_labels: np.ndarray):
+def compute_anchored_enrichment(bins_dict: dict, binary_labels: np.ndarray):
     """
     Compute seed-anchored enrichment of binary-labeled cells.
 
@@ -284,10 +291,7 @@ def compute_anchored_enrichment(bins_dict: dict,
                            out=np.full_like(f_local, np.nan),
                            where=f_global[None, :] > 0)
 
-    # Bin centers
-    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-
-    return enrichment, f_local, f_global, bin_centers, Ns
+    return enrichment, f_local, f_global, Ns
 
 
 def compute_anchored_radial_profile(bins_out: dict, field: np.ndarray):

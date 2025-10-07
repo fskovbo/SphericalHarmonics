@@ -22,7 +22,7 @@ class OrganoidMesh:
     """
 
     # --- Default annotation mapping ---
-    annotation_names_default = {
+    annotation_names = {
         'LGR5': '0.C02.percentile99_class',
         'Chromogranin A': '0.C03.percentile99_class',
         'Cyclin D': '0.C04.percentile99_class',
@@ -148,6 +148,7 @@ class OrganoidMesh:
             self.cell_label_field, self.marker_fields, self.marker_names = \
                 self.extract_markers_from_raw(marker_fields, marker_names, filter_lgr5=filter_lgr5)
         return self
+    
 
     # -------------------------------------------------------------------------
     # --- PCA alignment and rescaling
@@ -192,6 +193,7 @@ class OrganoidMesh:
         Compute the first k Laplace–Beltrami eigenmodes using the cotangent operator.
         """
         L, M = self.build_cotangent_laplacian_and_mass(self.v, self.f)
+        self.laplacian = L
         self.mass_matrix = M
         self.eigvals, self.eigvecs = eigsh(L, k=k, M=M, sigma=sigma, which="LM")
         return self.eigvals, self.eigvecs, self.mass_matrix
@@ -356,8 +358,7 @@ class OrganoidMesh:
             labels_contig[labs == old] = new
         return labels_contig, mapping
 
-    @staticmethod  
-    def extract_markers_from_raw(self, raw_fields, raw_names, annotation_names=None, filter_lgr5=True):
+    def extract_markers_from_raw(self, raw_fields, raw_names,filter_lgr5=True):
         """
         Extract standardized fate markers from raw field arrays and optionally filter LGR5 coexpression.
 
@@ -367,13 +368,9 @@ class OrganoidMesh:
             Raw vertex-associated field data.
         raw_names : list of str
             Names of the raw fields.
-        annotation_names : dict
-            Mapping of human-readable marker names -> raw field names.
         filter_lgr5 : bool
             Whether to apply LGR5 coexpression filtering.
         """
-        if annotation_names is None:
-            annotation_names = self.annotation_names_default
 
         field_names = list(raw_names)
         if "4.label" not in field_names:
@@ -383,7 +380,7 @@ class OrganoidMesh:
 
         markers_list = []
         marker_names = []
-        for human_name, raw_key in annotation_names.items():
+        for human_name, raw_key in self.annotation_names.items():
             if raw_key not in field_names:
                 raise ValueError(f"Marker field '{raw_key}' for '{human_name}' not found in raw names.")
             idx = field_names.index(raw_key)
@@ -394,7 +391,7 @@ class OrganoidMesh:
 
         # remap label ids to contiguous 0..C-1 for internal usage
         ref_field, _ = self._remap_labels_to_contiguous(ref_field)
-        ref_field = np.asarray(ref_field)
+        ref_field = np.asarray(ref_field, dtype=np.int32)
 
         if filter_lgr5:
             markers_vertex = self.filter_lgr5_coexpression(markers_vertex, marker_names)
@@ -437,7 +434,7 @@ class OrganoidMesh:
         and return the vertex index closest to that centroid.
 
         Returns:
-          unique_labels, centers_idx  (both numpy arrays)
+          centers_idx  (both numpy arrays)
         """
         if labels is None:
             labels = self.cell_label_field
@@ -454,7 +451,7 @@ class OrganoidMesh:
             dists = np.einsum("ij,ij->i", diffs, diffs)
             best_idx = patch_indices[np.argmin(dists)]
             centers_idx[i] = int(best_idx)
-        return unique_labels, centers_idx
+        return centers_idx
 
 
     def compute_cell_statistics(self, vertex_fields=None):
@@ -476,8 +473,6 @@ class OrganoidMesh:
             Area-weighted average of each field per cell.
         valid : (C,) boolean ndarray
             True if cell has non-zero area.
-        labels_contig : (V,) ndarray
-            Contiguous cell labels per vertex.
         """
 
         if vertex_fields is None:
@@ -515,7 +510,7 @@ class OrganoidMesh:
         centroids[valid] = weighted_pos[valid] / cell_area_v[valid, None]
         fields[valid] = weighted_field[valid] / cell_area_v[valid, None]
 
-        return centroids, cell_area_v, fields, valid, self.cell_label_field
+        return centroids, cell_area_v, fields, valid
 
 
 
