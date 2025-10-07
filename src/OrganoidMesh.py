@@ -2,6 +2,7 @@ import igl
 import numpy as np
 import scipy.sparse as sparse
 from scipy.sparse.linalg import eigsh
+from scipy.sparse.linalg import splu
 from sklearn.decomposition import PCA
 import vtk
 import pickle
