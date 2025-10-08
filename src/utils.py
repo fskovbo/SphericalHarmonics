@@ -3,6 +3,46 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from matplotlib import pyplot as plt 
 import vtk 
+import os
+
+
+def filter_organoid_paths(organoid_paths, discard_ids, timepoint, well):
+    """
+    Filter out organoid mesh paths whose IDs are in a discard list.
+
+    Parameters
+    ----------
+    organoid_paths : list of str
+        Full paths to organoid .vtp files.
+    discard_ids : array-like of str
+        Organoid IDs to discard (e.g., from a .npy or .csv file).
+        Expected format: "{timepoint}_{well}_{id}".
+    timepoint : str
+        Timepoint label (e.g. 'day4p5-more').
+    well : str
+        Well identifier (e.g. 'C01').
+
+    Returns
+    -------
+    kept_paths : list of str
+        Organoid paths that are not in the discard list.
+    discarded_paths : list of str
+        Paths that were filtered out.
+    """
+    discard_ids_set = set(discard_ids)  # for fast lookup
+    kept_paths = []
+    discarded_paths = []
+
+    for p in organoid_paths:
+        organoid_name = os.path.splitext(os.path.basename(p))[0]  # e.g., "105"
+        org_id = f"{timepoint}_{well}_{organoid_name}"
+        if org_id in discard_ids_set:
+            discarded_paths.append(p)
+        else:
+            kept_paths.append(p)
+
+    return kept_paths, discarded_paths
+
 
 def read_stl(filename): 
     reader = vtk.vtkSTLReader()

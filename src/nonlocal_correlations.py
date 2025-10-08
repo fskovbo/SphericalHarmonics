@@ -308,8 +308,6 @@ def compute_anchored_radial_profile(bins_out: dict, field: np.ndarray):
 
     Returns
     -------
-    bin_centers : (B,) ndarray
-        Midpoints of distance bins.
     mean_profile : (B,) ndarray
         Weighted average of field[j] per bin.
     stderr_profile : (B,) ndarray
@@ -317,7 +315,6 @@ def compute_anchored_radial_profile(bins_out: dict, field: np.ndarray):
     """
     bin_edges = bins_out['bin_edges']
     B = len(bin_edges) - 1
-    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
 
     mean_profile = np.full(B, np.nan)
     stderr_profile = np.full(B, np.nan)
@@ -337,4 +334,4 @@ def compute_anchored_radial_profile(bins_out: dict, field: np.ndarray):
         mean_profile[b] = mean_val
         stderr_profile[b] = stderr
 
-    return bin_centers, mean_profile, stderr_profile
+    return mean_profile, stderr_profile

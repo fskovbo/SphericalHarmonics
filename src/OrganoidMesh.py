@@ -374,6 +374,7 @@ class OrganoidMesh:
 
         field_names = list(raw_names)
         if "4.label" not in field_names:
+            print(field_names)
             raise ValueError("Reference field '4.label' not found in raw field names.")
         ref_idx = field_names.index("4.label")
         ref_field = np.asarray(raw_fields)[:, ref_idx]
