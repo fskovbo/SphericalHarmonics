@@ -77,6 +77,8 @@ def preprocess_single_organoid(path: str, save_path: str):
 
     # Cell adjacency graph
     cell_graph = build_cell_graph(mesh)
+    graph_edges = np.array(cell_graph.edges(), dtype=int)
+    graph_n_nodes = cell_graph.number_of_nodes()
 
     # --- Save all data ---
     np.savez_compressed(
@@ -86,7 +88,8 @@ def preprocess_single_organoid(path: str, save_path: str):
         marker_names=marker_names,
         cell_areas=cell_areas,
         dist_heat=dist_heat,
-        cell_graph=cell_graph,
+        graph_edges=graph_edges,
+        graph_n_nodes=graph_n_nodes,
         vertex_areas=vertex_areas,
         volume=volume,
         organoid_id=organoid_id,
