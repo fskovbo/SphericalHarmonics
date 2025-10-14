@@ -294,44 +294,63 @@ def compute_anchored_enrichment(bins_dict: dict, binary_labels: np.ndarray):
     return enrichment, f_local, f_global, Ns
 
 
+
 def compute_anchored_radial_profile(bins_out: dict, field: np.ndarray):
     """
-    Compute anchored radial profile of a continuous field
+    Compute anchored radial profile of one or multiple continuous fields
     (e.g., curvature) around sources.
 
     Parameters
     ----------
     bins_out : dict
         Output from pair_bins_from_sources().
-    field : (N,) ndarray
+    field : (N,) or (N, F) ndarray
         Continuous field values (per vertex or per cell).
+        If 2D, each column corresponds to a separate field.
 
     Returns
     -------
-    mean_profile : (B,) ndarray
+    mean_profile : (B,) or (B, F) ndarray
         Weighted average of field[j] per bin.
-    stderr_profile : (B,) ndarray
+    stderr_profile : (B,) or (B, F) ndarray
         Weighted standard error per bin.
     """
+    if field.ndim == 1:
+        field = field[:, None]  # (N,) -> (N, 1)
+    N, F = field.shape
+
     bin_edges = bins_out['bin_edges']
     B = len(bin_edges) - 1
 
-    mean_profile = np.full(B, np.nan)
-    stderr_profile = np.full(B, np.nan)
+    mean_profile = np.full((B, F), np.nan)
+    stderr_profile = np.full((B, F), np.nan)
 
     for b in range(B):
         J_b = bins_out[f'J_{b}']
         W_b = bins_out[f'W_{b}']
         if len(J_b) == 0:
             continue
-        values = field[J_b]
-        weights = W_b
-        mean_val = np.average(values, weights=weights)
-        # weighted standard error
-        var_val = np.average((values - mean_val)**2, weights=weights)
-        stderr = np.sqrt(var_val / len(values))
 
-        mean_profile[b] = mean_val
-        stderr_profile[b] = stderr
+        values = field[J_b, :]   # (nbin, F)
+        weights = np.asarray(W_b)[:, None]  # (nbin, 1)
+
+        # weighted mean per field
+        weighted_sum = np.sum(values * weights, axis=0)
+        weight_total = np.sum(weights, axis=0)
+        mean_val = weighted_sum / weight_total
+
+        # weighted variance per field
+        var_val = np.sum(weights * (values - mean_val)**2, axis=0) / weight_total
+
+        # standard error = sqrt(var / n)
+        stderr = np.sqrt(var_val / len(J_b))
+
+        mean_profile[b, :] = mean_val
+        stderr_profile[b, :] = stderr
+
+    # If only one field was passed, squeeze the trailing dimension
+    if mean_profile.shape[1] == 1:
+        mean_profile = mean_profile[:, 0]
+        stderr_profile = stderr_profile[:, 0]
 
     return mean_profile, stderr_profile
