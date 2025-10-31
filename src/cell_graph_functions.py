@@ -123,62 +123,6 @@ def kNN_marker_composition(cell_graph, positive_labels, focal_marker_idx, k=3):
     return avg_comp, std_comp, sem_comp, comp_accum
 
 
-def plot_cell_graph_3D(centroids, graph, node_color=None, node_size=5, edge_width=1):
-    """
-    Visualize a cell adjacency graph in 3D using centroids.
-
-    Args
-    ----
-    centroids : (N,3) ndarray
-        Coordinates of each cell (cell centers).
-    graph : networkx.Graph
-        Graph of cell adjacency (nodes = cell indices 0..N-1)
-    node_color : (N,) array, optional
-        Color per node (e.g., marker value or type)
-    node_size : int, optional
-        Marker size for nodes
-    edge_width : int, optional
-        Line width for edges
-    """
-    # Node coordinates
-    x, y, z = centroids[:,0], centroids[:,1], centroids[:,2]
-
-    if node_color is None:
-        node_color = ['blue'] * len(centroids)
-    else:
-        # if node_color is numeric 0/1, map to colors
-        if np.issubdtype(np.array(node_color).dtype, np.number):
-            node_color = ['red' if val > 0 else 'blue' for val in node_color]
-
-    # Node trace
-    node_trace = go.Scatter3d(
-        x=x, y=y, z=z,
-        mode='markers',
-        marker=dict(size=node_size, color=node_color, line=dict(width=0)),
-        hoverinfo='text'
-    )
-
-    # Create edge traces
-    edge_x, edge_y, edge_z = [], [], []
-    for i, j in graph.edges():
-        edge_x += [centroids[i,0], centroids[j,0], None]
-        edge_y += [centroids[i,1], centroids[j,1], None]
-        edge_z += [centroids[i,2], centroids[j,2], None]
-
-    edge_trace = go.Scatter3d(
-        x=edge_x, y=edge_y, z=edge_z,
-        mode='lines',
-        line=dict(width=edge_width, color='gray'),
-        hoverinfo='none'
-    )
-
-    fig = go.Figure(data=[edge_trace, node_trace])
-    fig.update_layout(scene=dict(
-        xaxis_title='X', yaxis_title='Y', zaxis_title='Z',
-        aspectmode='data'
-    ))
-    fig.show()
-
 
 def build_weight_matrix_kNN(G, k=1, row_standardize=False):
     """
