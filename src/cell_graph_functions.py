@@ -67,6 +67,28 @@ def build_cell_graph(mesh):
     return G
 
 
+def load_cell_graph_from_npz(data: np.lib.npyio.NpzFile) -> nx.Graph:
+    """
+    Reconstruct a NetworkX graph from edges and node count stored in an NPZ file.
+    This matches the new preprocessing format where `edges` and `n_nodes`
+    are explicitly saved.
+    """
+    if "graph_edges" not in data.files or "graph_n_nodes" not in data.files:
+        raise KeyError("NPZ file must contain 'edges' and 'n_nodes' to load the cell graph.")
+
+    edges = data["graph_edges"]
+    n_nodes = int(data["graph_n_nodes"])
+
+    G = nx.Graph()
+    G.add_nodes_from(range(n_nodes))
+
+    if edges.size > 0:
+        edges = edges.reshape(-1, 2)
+        G.add_edges_from(edges.tolist())
+
+    return G
+
+
 def kNN_marker_composition(cell_graph, positive_labels, focal_marker_idx, k=3):
     """
     For cells positive for a given focal marker, compute the average composition

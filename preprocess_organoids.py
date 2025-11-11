@@ -10,7 +10,7 @@ from src.utils import *
 
 
 data_dir = '../NicoleData/20250929/fractal_output'
-timepoints = ['day2p5'] #['day3', 'day3p5', 'day4', 'day4p5', 'day4p5-more']
+timepoints = ['day3', 'day3p5', 'day4', 'day4p5', 'day4p5-more']
 zarr_names = {tp: 'r0.zarr' for tp in timepoints}
 rounds = {tp: '0_fused_zillum_registered' for tp in timepoints}
 meshes = {tp: 'nnorg_linked_multi_annotated_class' for tp in timepoints}
@@ -60,7 +60,7 @@ def preprocess_single_organoid(path: str, save_path: str):
     volume = mesh.calc_mesh_volume()
 
     # HKS fields
-    hks, hks_coeffs = compute_hks(mesh, t=[1.0, 4.0, 25.0])
+    hks, hks_coeffs = compute_hks(mesh, t=[1.0, 2.0, 4.0, 8.0, 25.0])
     # hks_removed_l0, _ = mesh.remove_lowest_modes(coeffs=hks_coeffs, l_remove=1)
     # fields = np.concatenate([hks, hks_removed_l0], axis=1)
     fields = hks
@@ -95,6 +95,7 @@ def preprocess_single_organoid(path: str, save_path: str):
         volume=volume,
         organoid_id=organoid_id,
         well=well,
+        centroids=centroids,
     )
 
 
