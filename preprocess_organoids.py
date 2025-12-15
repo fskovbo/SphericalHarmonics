@@ -10,7 +10,7 @@ from src.utils import *
 
 
 data_dir = '../NicoleData/20250929/fractal_output'
-timepoints = ['day3', 'day3p5', 'day4', 'day4p5', 'day4p5-more']
+timepoints = ['day2p5'] # ['day3', 'day3p5', 'day4', 'day4p5', 'day4p5-more']
 zarr_names = {tp: 'r0.zarr' for tp in timepoints}
 rounds = {tp: '0_fused_zillum_registered' for tp in timepoints}
 meshes = {tp: 'nnorg_linked_multi_annotated_class' for tp in timepoints}

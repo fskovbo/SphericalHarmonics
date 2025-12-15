@@ -88,7 +88,8 @@ def compute_geodesics(mesh, t=None, sources=None):
         edges = np.vstack([mesh.f[:, [0, 1]], mesh.f[:, [1, 2]], mesh.f[:, [2, 0]]])
         edges = np.unique(np.sort(edges, axis=1), axis=0)
         mean_edge = np.mean(np.linalg.norm(mesh.v[edges[:, 0]] - mesh.v[edges[:, 1]], axis=1))
-        t = mean_edge ** 2
+        k = 5.0 # timescale spans around 5 mean edge lengths
+        t = (k * mean_edge) ** 2
 
     A = (mesh.mass_matrix + t * mesh.laplacian).tocsc()
     A_factor = splu(A)

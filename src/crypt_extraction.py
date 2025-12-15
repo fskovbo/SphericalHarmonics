@@ -161,10 +161,6 @@ def make_crypt_mask_from_HKS(HKS, crypt_threshold, times=None):
     if times.shape[0] != T:
         raise ValueError("len(times) must equal HKS.shape[1].")
 
-    # Center across nodes at each timepoint
-    mu_t = np.nanmean(HKS, axis=0, keepdims=True)
-    centered = HKS - mu_t  # (N,T)
-
     # cond_center = np.all(centered[:,0] > crypt_threshold, axis=1)
     # cond_first = centered[:, 0] > crypt_threshold
     cond_first = HKS[:, 0] > crypt_threshold
