@@ -1,12 +1,132 @@
 import numpy as np
 import networkx as nx
 import plotly.graph_objects as go
+from src.mesh_analysis import compute_hks
 
 """
 Cleaned utilities to detect necks and crypts on an organoid graph using HKS.
 - Short helpers appear first, then core methods in call order.
 - Diagnostics-only utilities were removed; verbose printing and plotting remain.
 """
+
+# ===========================
+# Bag-of-features functionality for vocab-based segmentation
+# ===========================
+
+def compute_vocabulary_encoding(bag_of_features, mesh):
+
+    vocab = bag_of_features['vocab']
+    scaler = bag_of_features['scaler'].item()
+    sigma = bag_of_features['sigma']
+    ts = bag_of_features['ts']
+
+    hks = compute_hks(mesh, ts, coeffs=False)
+
+    # normalise
+    normalised_hks = (hks/np.mean(hks, axis=0, keepdims=True) - 1)
+    normalised_hks = scaler.transform(normalised_hks)
+
+    # convert to encoding
+    dist = np.linalg.norm(normalised_hks[:, np.newaxis, :]-vocab[np.newaxis, :, :], axis=2)
+    encoding = np.exp(-dist**2 / (2 * sigma**2))
+
+    return encoding, hks, normalised_hks, ts
+
+
+def segment_organoid_from_vocab(
+    G,
+    crypt_vocab_idx,
+    crypt_thresh=0.9,
+    min_crypt_region_size=5,
+    min_villus_region_size=1,
+):
+    """
+    Segment an organoid graph into crypt and villus regions using only
+    the 'vocab_encoding' node attribute.
+
+    Parameters
+    ----------
+    G : networkx.Graph
+        Organoid cell graph. Nodes are assumed to be integers 0..N-1.
+        Each node i must have:
+            - G.nodes[i]["vocab_encoding"] : 1D array-like of length >= max(crypt_vocab_idx)+1
+    crypt_vocab_idx : iterable of int
+        Indices into vocab_encoding that correspond to crypt-like features.
+        A node is considered crypt-positive if max(vocab_encoding[crypt_vocab_idx]) >= crypt_thresh.
+    crypt_thresh : float, default 0.9
+        Threshold on the max crypt-vocab score for a node to be considered crypt-positive.
+    min_crypt_region_size : int, default 5
+        Minimum number of nodes for a connected component to be kept as a crypt region.
+    min_villus_region_size : int, default 1
+        Minimum size for villus connected components (everything not in crypts).
+
+    Returns
+    -------
+    crypt_regions : list of set[int]
+        Each set is a connected component of crypt-positive nodes.
+    neck_regions : list of set[int]
+        Always empty here (no necks computed, for API compatibility).
+    villus_regions : list of set[int]
+        Connected components of nodes not in any crypt region.
+    """
+
+    # Assume nodes are 0..N-1 as in your graph-building code
+    nodes = sorted(G.nodes())
+    N = len(nodes)
+
+    # Safety check: we rely on node ids as indices
+    if nodes != list(range(N)):
+        raise ValueError("segment_organoid_from_vocab assumes nodes are 0..N-1.")
+
+    # Collect vocab encodings into an (N, P) array
+    vocab_enc = np.stack(
+        [np.asarray(G.nodes[n]["vocab_encoding"], dtype=float) for n in nodes],
+        axis=0,
+    )
+
+    crypt_vocab_idx = np.asarray(list(crypt_vocab_idx), dtype=int)
+    if crypt_vocab_idx.ndim != 1:
+        raise ValueError("crypt_vocab_idx must be a 1D iterable of indices.")
+
+    # --- 1) Crypt mask: max over chosen vocab channels ---
+    crypt_scores = vocab_enc[:, crypt_vocab_idx].max(axis=1)   # (N,)
+    crypt_mask = crypt_scores >= crypt_thresh                  # boolean (N,)
+
+    # --- Helper: connected components restricted to mask == True ---
+    def _find_regions_from_mask(mask, min_region_size):
+        regions = []
+        visited = np.zeros(N, dtype=bool)
+
+        for i in range(N):
+            if not mask[i] or visited[i]:
+                continue
+
+            comp = set()
+            stack = [i]
+            while stack:
+                u = stack.pop()
+                if visited[u] or not mask[u]:
+                    continue
+                visited[u] = True
+                comp.add(u)
+                for v in G.neighbors(u):
+                    if (not visited[v]) and mask[v]:
+                        stack.append(v)
+
+            if len(comp) >= min_region_size:
+                regions.append(comp)
+
+        return regions
+
+    # --- 2) Crypt regions ---
+    crypt_regions = _find_regions_from_mask(crypt_mask, min_crypt_region_size)
+
+    # --- 3) Villus regions: complement of crypt_mask ---
+    villus_mask = ~crypt_mask
+    villus_regions = _find_regions_from_mask(villus_mask, min_villus_region_size)
+
+    return crypt_regions, villus_regions
+
 
 
 # ===========================
