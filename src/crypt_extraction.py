@@ -39,35 +39,26 @@ def segment_organoid_from_vocab(
     crypt_thresh=0.9,
     min_crypt_region_size=5,
     min_villus_region_size=1,
+    neck_vocab_idx=None,
+    neck_thresh=0.9,
 ):
     """
-    Segment an organoid graph into crypt and villus regions using only
+    Segment an organoid graph into crypt / (optional neck) / villus regions using only
     the 'vocab_encoding' node attribute.
 
-    Parameters
-    ----------
-    G : networkx.Graph
-        Organoid cell graph. Nodes are assumed to be integers 0..N-1.
-        Each node i must have:
-            - G.nodes[i]["vocab_encoding"] : 1D array-like of length >= max(crypt_vocab_idx)+1
-    crypt_vocab_idx : iterable of int
-        Indices into vocab_encoding that correspond to crypt-like features.
-        A node is considered crypt-positive if max(vocab_encoding[crypt_vocab_idx]) >= crypt_thresh.
-    crypt_thresh : float, default 0.9
-        Threshold on the max crypt-vocab score for a node to be considered crypt-positive.
-    min_crypt_region_size : int, default 5
-        Minimum number of nodes for a connected component to be kept as a crypt region.
-    min_villus_region_size : int, default 1
-        Minimum size for villus connected components (everything not in crypts).
+    A node is:
+      - crypt-positive if max(vocab_encoding[crypt_vocab_idx]) >= crypt_thresh
+      - neck-positive  if (neck_vocab_idx is not None) and
+                        max(vocab_encoding[neck_vocab_idx])  >= neck_thresh
+
+    Precedence:
+      crypt wins over neck (i.e. neck_mask excludes crypt nodes).
 
     Returns
     -------
-    crypt_regions : list of set[int]
-        Each set is a connected component of crypt-positive nodes.
-    neck_regions : list of set[int]
-        Always empty here (no necks computed, for API compatibility).
-    villus_regions : list of set[int]
-        Connected components of nodes not in any crypt region.
+    crypt_regions : list[set[int]]
+    neck_regions  : list[set[int]]   # empty if neck_vocab_idx is None
+    villus_regions: list[set[int]]   # everything not crypt nor neck
     """
 
     # Assume nodes are 0..N-1 as in your graph-building code
@@ -87,10 +78,6 @@ def segment_organoid_from_vocab(
     crypt_vocab_idx = np.asarray(list(crypt_vocab_idx), dtype=int)
     if crypt_vocab_idx.ndim != 1:
         raise ValueError("crypt_vocab_idx must be a 1D iterable of indices.")
-
-    # --- 1) Crypt mask: max over chosen vocab channels ---
-    crypt_scores = vocab_enc[:, crypt_vocab_idx].max(axis=1)   # (N,)
-    crypt_mask = crypt_scores >= crypt_thresh                  # boolean (N,)
 
     # --- Helper: connected components restricted to mask == True ---
     def _find_regions_from_mask(mask, min_region_size):
@@ -118,14 +105,177 @@ def segment_organoid_from_vocab(
 
         return regions
 
-    # --- 2) Crypt regions ---
-    crypt_regions = _find_regions_from_mask(crypt_mask, min_crypt_region_size)
+    # --- 1) Crypt mask ---
+    crypt_scores = vocab_enc[:, crypt_vocab_idx].max(axis=1)   # (N,)
+    crypt_mask = crypt_scores >= crypt_thresh                  # boolean (N,)
 
-    # --- 3) Villus regions: complement of crypt_mask ---
-    villus_mask = ~crypt_mask
+    # --- 2) Optional neck mask ---
+    neck_mask = np.zeros(N, dtype=bool)
+    if neck_vocab_idx is not None:
+        neck_vocab_idx = np.asarray(list(neck_vocab_idx), dtype=int)
+        if neck_vocab_idx.ndim != 1:
+            raise ValueError("neck_vocab_idx must be a 1D iterable of indices.")
+        neck_scores = vocab_enc[:, neck_vocab_idx].max(axis=1)
+        neck_mask = (neck_scores >= neck_thresh)
+
+        # precedence: crypt overrides neck
+        neck_mask = neck_mask & (~crypt_mask)
+
+    # --- 3) Regions ---
+    crypt_regions = _find_regions_from_mask(crypt_mask, min_crypt_region_size)
+    neck_regions = _find_regions_from_mask(neck_mask, min_crypt_region_size) if neck_vocab_idx is not None else []
+
+    # --- 4) Villus: everything not crypt nor neck (if necks enabled) ---
+    occupied = crypt_mask | neck_mask
+    villus_mask = ~occupied
     villus_regions = _find_regions_from_mask(villus_mask, min_villus_region_size)
 
-    return crypt_regions, villus_regions
+    return crypt_regions, neck_regions, villus_regions
+
+
+
+from collections import deque
+
+def grow_crypts_toward_necks(
+    G,
+    crypt_regions,
+    neck_regions=None,
+    N=3,
+    min_villus_region_size=1,
+):
+    """
+    Typically needed after segmenting using vocab.
+    
+    1) For each crypt region, check if there are neck cells within <= N hops,
+       where the path can traverse only villus/unassigned cells (NOT neck, NOT any crypt).
+       If yes, grow that crypt outward by up to N hops, only over villus/unassigned cells.
+       (Never grow into neck or any crypt.)
+
+    2) Reassign villus as all nodes that are not crypt nor neck, and return villus
+       connected components.
+
+    Parameters
+    ----------
+    G : networkx.Graph
+    crypt_regions : list[set[int]]
+    neck_regions : list[set[int]] or None
+        If None or empty, neck set is treated as empty.
+    N : int
+        Hop radius for "neck nearby" and growth.
+    min_villus_region_size : int
+        Minimum size of villus connected components to return.
+
+    Returns
+    -------
+    crypt_regions_grown : list[set[int]]
+    neck_regions : list[set[int]]
+        Returned unchanged (or empty list if None provided).
+    villus_regions : list[set[int]]
+        Recomputed after crypt growth.
+    """
+
+    # --- normalize necks ---
+    if neck_regions is None:
+        neck_regions = []
+    neck_nodes = set().union(*neck_regions) if len(neck_regions) else set()
+
+    # --- global crypt occupancy (to prevent overlap across crypts) ---
+    crypt_owner = {}
+    for ci, reg in enumerate(crypt_regions):
+        for u in reg:
+            crypt_owner[u] = ci
+    all_crypt_nodes = set(crypt_owner.keys())
+
+    crypt_regions_grown = [set(reg) for reg in crypt_regions]
+
+    # --- helper: connected components from a boolean mask ---
+    nodes = sorted(G.nodes())
+    Nnodes = len(nodes)
+    if nodes != list(range(Nnodes)):
+        # You can relax this if your graph node ids aren't 0..N-1, but then
+        # you'd want a node->index mapping. Keeping it strict like your pipeline.
+        raise ValueError("This function assumes nodes are 0..N-1.")
+
+    def _regions_from_mask(mask, min_size):
+        visited = [False] * Nnodes
+        out = []
+        for i in range(Nnodes):
+            if not mask[i] or visited[i]:
+                continue
+            comp = set()
+            stack = [i]
+            while stack:
+                u = stack.pop()
+                if visited[u] or not mask[u]:
+                    continue
+                visited[u] = True
+                comp.add(u)
+                for v in G.neighbors(u):
+                    if (not visited[v]) and mask[v]:
+                        stack.append(v)
+            if len(comp) >= min_size:
+                out.append(comp)
+        return out
+
+    # --- grow crypts toward nearby necks ---
+    for ci, crypt in enumerate(crypt_regions_grown):
+        other_crypt_nodes = all_crypt_nodes - crypt
+
+        dist = {}
+        q = deque()
+
+        for s in crypt:
+            dist[s] = 0
+            q.append(s)
+
+        candidates = set()
+        neck_within_N = False
+
+        while q:
+            u = q.popleft()
+            du = dist[u]
+            if du == N:
+                continue
+
+            for v in G.neighbors(u):
+                if v in dist:
+                    continue
+
+                # detect neck (but never traverse into it)
+                if v in neck_nodes:
+                    neck_within_N = True
+                    continue
+
+                # never traverse/grow into any crypt node
+                if v in all_crypt_nodes:
+                    continue
+
+                # otherwise villus/unassigned => allowed
+                dist[v] = du + 1
+                q.append(v)
+                candidates.add(v)
+
+        if neck_within_N and candidates:
+            # ensure we don't overlap forbidden (should already be true, but keep safe)
+            candidates -= neck_nodes
+            candidates -= other_crypt_nodes
+
+            # apply growth
+            crypt |= candidates
+
+            # update global occupancy so later crypts can't claim these nodes
+            for v in candidates:
+                all_crypt_nodes.add(v)
+                crypt_owner[v] = ci
+
+    # --- recompute villus as everything not crypt nor neck ---
+    crypt_nodes_final = set().union(*crypt_regions_grown) if len(crypt_regions_grown) else set()
+    villus_mask = [((i not in crypt_nodes_final) and (i not in neck_nodes)) for i in range(Nnodes)]
+    villus_regions = _regions_from_mask(villus_mask, min_villus_region_size)
+
+    return crypt_regions_grown, neck_regions, villus_regions
+
+
 
 
 

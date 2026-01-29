@@ -365,8 +365,8 @@ def compute_geodesic_voronoi(mesh, proj_vertex_ids):
     Returns:
     ----------
     dist_mat : (V, N_cells) geodesic distances
-    vertex_owner : (V,) index of closest cell for each vertex
+    cell_label_field : (V,) index of closest cell for each vertex
     """
     dist_mat = compute_geodesics(mesh, t=None, sources=proj_vertex_ids)  # your existing function
-    vertex_owner = np.argmin(dist_mat, axis=0)
-    return dist_mat, vertex_owner
+    cell_label_field = np.argmin(dist_mat, axis=0)
+    return dist_mat, cell_label_field

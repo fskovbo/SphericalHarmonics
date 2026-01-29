@@ -59,7 +59,7 @@ def create_organoid_graph_from_mesh(
     -------
     G : networkx.Graph
     dist_mat : (V, N_cells) geodesic distances (if computed)
-    vertex_owner : (V,)
+    cell_label_field : (V,)
     proj_vertex_ids : (N_cells,)
     """
     organoid_id = os.path.splitext(os.path.basename(mesh_path))[0]
@@ -86,25 +86,25 @@ def create_organoid_graph_from_mesh(
         resolve_duplicates=resolve_duplicates,
     )
 
-    # store eigen-decomposition for geodesics (if needed by compute_geodesics)
+    # store eigen-decomposition of Laplacian for geodesics
     mesh._eig_decomp()
 
     # 4) geodesic distances + Voronoi assignment
-    dist_mat, vertex_owner = compute_geodesic_voronoi(mesh, proj_vertex_ids)
+    dist_mat, cell_label_field = compute_geodesic_voronoi(mesh, proj_vertex_ids)
 
     # 5) build graph from Voronoi partition (now pass mesh, not mesh_f)
     G = build_cell_graph_from_voronoi(
         nuclei_xyz,
         markers_bin,
         mesh,            
-        vertex_owner,
+        cell_label_field,
         proj_vertex_ids,
         proj_points,
     )
 
     G.graph["label_uid"] = label_uid   # store metadata in the graph object
 
-    return G, dist_mat, vertex_owner, proj_vertex_ids, mesh
+    return G, dist_mat, cell_label_field, proj_vertex_ids, mesh
 
 
 # ---------------------------------------------------------------------
