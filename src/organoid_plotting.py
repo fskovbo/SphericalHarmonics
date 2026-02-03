@@ -58,7 +58,7 @@ def plot_organoid_graph(
     # --- Node coloring ---
     marker_kwargs = dict(size=node_size, line=dict(width=0))
     if node_values is None:
-        marker_kwargs["color"] = "blue"
+        marker_kwargs["color"] = "gray"
         showscale = False
     else:
         arr = np.asarray(list(node_values))
