@@ -1017,6 +1017,86 @@ def assign_crypts_by_neckline(dnorm_cells_per_crypt, s_thresh=1.0):
 
 
 # ===========================================================
+# Filtering of crypt candidates based on marker content
+# ===========================================================
+
+def filter_crypt_by_markers(
+    G,
+    crypt_cells,
+    pos_markers=None,     # list[int]
+    neg_markers=None,     # list[int]
+    pos_min_cells=1,
+    neg_min_cells=1,
+    roi_frac=None,        # e.g. 0.3 -> use cells with dist_bottom <= 0.3
+    dist_bottom=None,     # (N_cells,) normalized distances
+    require_all_pos=True,
+):
+    """
+    Return True if crypt passes marker filters, else False.
+
+    Rules
+    -----
+    - Positive markers: require >= pos_min_cells in ROI
+    - Negative markers: reject if >= neg_min_cells in ROI
+    - ROI = all crypt cells, or if roi_frac is given:
+            cells with dist_bottom <= roi_frac
+    """
+
+    if not crypt_cells:
+        return False
+
+    pos_markers = [] if pos_markers is None else [int(k) for k in pos_markers]
+    neg_markers = [] if neg_markers is None else [int(k) for k in neg_markers]
+
+    crypt_idx = np.fromiter(set(crypt_cells), dtype=np.int64)
+
+    # -----------------------------
+    # ROI selection
+    # -----------------------------
+    if roi_frac is not None:
+        if dist_bottom is None:
+            raise ValueError("dist_bottom required when roi_frac is used.")
+        Db = np.asarray(dist_bottom, float)[crypt_idx]
+        roi_idx = crypt_idx[np.isfinite(Db) & (Db <= float(roi_frac))]
+        if roi_idx.size == 0:
+            return False
+    else:
+        roi_idx = crypt_idx
+
+    # -----------------------------
+    # Count marker-positive cells
+    # -----------------------------
+    needed = sorted(set(pos_markers + neg_markers))
+    counts = {k: 0 for k in needed}
+
+    for cid in roi_idx:
+        mb = np.asarray(G.nodes[int(cid)]["markers_bin"], dtype=np.int64)
+        for k in needed:
+            counts[k] += int(mb[k])
+
+    # -----------------------------
+    # Positive marker rule
+    # -----------------------------
+    if pos_markers:
+        ok = [(counts[k] >= pos_min_cells) for k in pos_markers]
+        if require_all_pos:
+            if not all(ok):
+                return False
+        else:
+            if not any(ok):
+                return False
+
+    # -----------------------------
+    # Negative marker rule
+    # -----------------------------
+    for k in neg_markers:
+        if counts[k] >= neg_min_cells:
+            return False
+
+    return True
+
+
+# ===========================================================
 # Scalar metrics for clustering crypts based on morphology
 # ===========================================================
 
@@ -1092,3 +1172,51 @@ def compute_crypt_metrics(
         CI = 0.0
 
     return BI, CI, EI
+
+
+import numpy as np
+
+def compute_BI(
+    s,        # (B,) bin centers (or s-sampling)
+    C,        # (B,) circumference profile C(s)
+    s_max=1.0,
+    eps=1e-12,
+):
+    """
+    Compute budding index (BI) for a single crypt:
+
+        BI = 1 - C(s=1) / max_{s<=1} C(s)
+
+    Returns
+    -------
+    BI : float in [0,1]
+
+    Notes
+    -----
+    - Uses only bins with s <= s_max and finite C.
+    - If s does not contain exactly 1.0, uses the last valid value
+      (same behavior as your current code).
+    - If profile is invalid, returns 0.
+    """
+    s = np.asarray(s, dtype=float)
+    C = np.asarray(C, dtype=float)
+
+    if s.ndim != 1 or C.ndim != 1 or len(s) != len(C):
+        raise ValueError("s and C must be 1D arrays of equal length.")
+
+    m = (s <= float(s_max)) & np.isfinite(C)
+    if np.sum(m) < 2:
+        return 0.0
+
+    sC = s[m]
+    CC = C[m]
+
+    # circumference at s≈1 (use last valid bin ≤ s_max)
+    C1 = CC[-1]
+    Cmax = np.nanmax(CC)
+
+    if not (np.isfinite(C1) and np.isfinite(Cmax) and Cmax > eps):
+        return 0.0
+
+    BI = 1.0 - float(C1) / float(Cmax)
+    return float(np.clip(BI, 0.0, 1.0))

@@ -168,3 +168,58 @@ def build_G_face(v, f):
         G_face[:, a, :] = grad
 
     return G_face
+
+
+
+from scipy import sparse
+from scipy.sparse.csgraph import dijkstra
+
+def compute_geodesics_dijkstra(mesh, t=None, sources=None):
+    """
+    Approx geodesic distances via Dijkstra on the mesh edge graph.
+    Distances are shortest paths constrained to edges (fast, less accurate).
+
+    Parameters
+    ----------
+    mesh : must provide mesh.v (V,3) and mesh.f (F,3)
+    sources : (S,) int array or None
+        Source vertices. If None -> all vertices (expensive).
+    return_predecessors : bool
+        If True, also return predecessor array from scipy.
+
+    Returns
+    -------
+    D : (S,V) float64
+        Distances from each source.
+    pred : (S,V) int32 (optional)
+        Predecessors for path reconstruction.
+    """
+    v = mesh.v
+    f = mesh.f
+    V = v.shape[0]
+
+    # Unique undirected edges from faces
+    edges = np.vstack([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]])
+    edges = np.unique(np.sort(edges, axis=1), axis=0)  # (E,2)
+    i = edges[:, 0]
+    j = edges[:, 1]
+
+    # Edge weights = Euclidean edge lengths
+    w = np.linalg.norm(v[i] - v[j], axis=1)
+
+    # Build symmetric adjacency (CSR)
+    row = np.concatenate([i, j])
+    col = np.concatenate([j, i])
+    data = np.concatenate([w, w])
+    A = sparse.csr_matrix((data, (row, col)), shape=(V, V))
+
+    if sources is None:
+        sources = np.arange(V, dtype=np.int32)
+    else:
+        sources = np.asarray(sources, dtype=np.int32)
+
+    dist = dijkstra(csgraph=A, directed=False, indices=sources,
+                          return_predecessors=False)
+
+    dist = np.asarray(dist, dtype=np.float64)  # (S,V)
+    return dist
