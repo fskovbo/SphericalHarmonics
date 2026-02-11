@@ -17,30 +17,61 @@ from src.utils import filter_organoid_paths
 # ---------------------------------------------------------------------
 # Dataset configuration (mirrors preprocess_organoids.py)
 # ---------------------------------------------------------------------
-data_dir = '../NicoleData/20250929/fractal_output'
+# data_dir = '../NicoleData/20250929/fractal_output'
 
-timepoints = ['day2', 'day2p5', 'day3', 'day3p5', 'day4', 'day4p5', 'day4p5-more']   # extend as needed: ['day3', 'day3p5', ...]
-zarr_names = {tp: 'r0.zarr' for tp in timepoints}
-rounds     = {tp: '0_fused_zillum_registered' for tp in timepoints}
-meshes     = {tp: 'nnorg_linked_multi_annotated_class' for tp in timepoints}
+# timepoints = ['day2', 'day2p5', 'day3', 'day3p5', 'day4', 'day4p5', 'day4p5-more']   # extend as needed: ['day3', 'day3p5', ...]
+# zarr_names = {tp: 'r0.zarr' for tp in timepoints}
+# rounds     = {tp: '0_fused_zillum_registered' for tp in timepoints}
+# meshes     = {tp: 'nnorg_linked_multi_annotated_class' for tp in timepoints}
+
+# wells = {
+#     'day1p5': ['A01', 'A02', 'A03', 'A04', 'A05', 'A06'],
+#     'day2': ['A01', 'A02', 'A03', 'A04', 'A05', 'A06'],
+#     'day2p5': ['A01', 'A02', 'A03', 'A04', 'A05', 'A06'],
+#     'day3': ['A01', 'A02', 'A03', 'A04', 'A05', 'A06', 'B02', 'B03'],
+#     'day3p5': ['A01', 'A02', 'A03', 'A04', 'B03'],
+#     'day4': ['A02', 'A03', 'A04', 'A05', 'A06', 'B01', 'B02'],
+#     'day4p5': ['A06', 'B06'],
+#     'day4p5-more': ['C01', 'C02', 'C03', 'C04', 'C05', 'C06'],
+# }
+
+
+data_dir = '../NicoleData/20251201/fractal_output'
+
+timepoints = ['day4p5']   # extend as needed: ['day3', 'day3p5', ...]
+zarr_names = {tp: '251130R0.zarr' for tp in timepoints}
+rounds     = {tp: '2_zillum_registered' for tp in timepoints}
+meshes     = {tp: 'nnorg_corrected_annotated_by_projection' for tp in timepoints}
 
 wells = {
-    'day1p5': ['A01', 'A02', 'A03', 'A04', 'A05', 'A06'],
-    'day2': ['A01', 'A02', 'A03', 'A04', 'A05', 'A06'],
-    'day2p5': ['A01', 'A02', 'A03', 'A04', 'A05', 'A06'],
-    'day3': ['A01', 'A02', 'A03', 'A04', 'A05', 'A06', 'B02', 'B03'],
-    'day3p5': ['A01', 'A02', 'A03', 'A04', 'B03'],
-    'day4': ['A02', 'A03', 'A04', 'A05', 'A06', 'B01', 'B02'],
-    'day4p5': ['A06', 'B06'],
-    'day4p5-more': ['C01', 'C02', 'C03', 'C04', 'C05', 'C06'],
+    'day4p5': ['B02', 'B03', 'B04', 'B05'],
 }
 
 hks_times = [1.0, 2.0, 4.0, 8.0, 25.0]
 
 
 # Path to the combined nuclei table (adjust if different)
-CELLS_CSV = "../NicoleData/features_csv/features/cell_types_class.csv"   # <-- adjust
+# CELLS_CSV = "../NicoleData/features_csv/features/cell_types_class.csv"   # <-- adjust
+CELLS_CSV = "../NicoleData/20251201/cell_features_class.csv"   # <-- adjust
 
+
+MARKER_COLS = [
+    '0.C02.percentile99_class', # LGR5
+    '0.C03.percentile99_class', # chroma
+    '0.C04.percentile99_class', # aldoB
+    '1.C02.percentile99_class', # Sero
+    '1.C03.percentile99_class', # Lyz
+    '1.C04.percentile99_class', # Agr2
+    '2.C04.percentile99_class', # ki67
+]
+
+coexpress_markers=(
+    "1.C03.percentile99_class",     # Lysozyme → Paneth
+    "1.C04.percentile99_class",     # Agr2 → Goblet/Paneth
+    "1.C02.percentile99_class",    # Serotonin → Enterochromaffin
+    "0.C03.percentile99_class",  # Chromogranin A → Enteroendocrine
+),
+lgr5_marker="0.C02.percentile99_class"
 
 # ---------------------------------------------------------------------
 # Helper: preprocess a single organoid -> graph with HKS + encoding
@@ -77,7 +108,7 @@ def create_organoid_graph_from_mesh(
     nuclei_xyz, markers_bin = extract_cell_attributes(nuclei_df_org)
 
     _, nuclei_xyz = center_and_rescale_mesh(mesh, nuclei_xyz)
-    markers_bin = filter_lgr5_coexpression(markers_bin) 
+    markers_bin = filter_lgr5_coexpression(markers_bin, marker_names=MARKER_COLS, coexpress_markers=coexpress_markers, lgr5_marker=lgr5_marker) 
 
     # 3) project nuclei -> mesh vertices (using geometry from the mesh object)
     proj_vertex_ids, proj_points = project_nuclei_to_mesh(
@@ -130,9 +161,16 @@ def preprocess_all_organoid_graphs():
     vocab = np.load('./sim/vocab.npz', allow_pickle=True)
 
     # same discard list as mesh preproc
-    discard_ids = np.load('../NicoleData/combined_labels_to_discard.npy', allow_pickle=True)
+    discard_path = '../NicoleData/combined_labels_to_discard.npy'
 
-    graphs_base = os.path.join('..', 'NicoleData', 'graphs')
+    if os.path.exists(discard_path):
+        discard_ids = np.load(discard_path, allow_pickle=True)
+        print(f"Loaded discard list with {len(discard_ids)} entries")
+    else:
+        print("No combined_labels_to_discard file found — no organoids will be filtered")
+        discard_ids = []
+
+    graphs_base = os.path.join('..', 'NicoleData', 'graphs_new')
     os.makedirs(graphs_base, exist_ok=True)
 
     for tp in timepoints:
