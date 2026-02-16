@@ -174,7 +174,7 @@ def build_G_face(v, f):
 from scipy import sparse
 from scipy.sparse.csgraph import dijkstra
 
-def compute_geodesics_dijkstra(mesh, t=None, sources=None):
+def compute_geodesics_dijkstra(mesh, sources=None):
     """
     Approx geodesic distances via Dijkstra on the mesh edge graph.
     Distances are shortest paths constrained to edges (fast, less accurate).
@@ -184,8 +184,6 @@ def compute_geodesics_dijkstra(mesh, t=None, sources=None):
     mesh : must provide mesh.v (V,3) and mesh.f (F,3)
     sources : (S,) int array or None
         Source vertices. If None -> all vertices (expensive).
-    return_predecessors : bool
-        If True, also return predecessor array from scipy.
 
     Returns
     -------

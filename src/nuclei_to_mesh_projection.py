@@ -23,20 +23,25 @@ from src.mesh_analysis import compute_geodesics
 #     return nuclei_xyz, markers_bin
 
 
-MARKER_COLS = [
-    '0.C02.percentile99_class', # LGR5
-    '0.C03.percentile99_class', # chroma
-    '0.C04.percentile99_class', # aldoB
-    '1.C02.percentile99_class', # Sero
-    '1.C03.percentile99_class', # Lyz
-    '1.C04.percentile99_class', # Agr2
-    '2.C04.percentile99_class', # ki67
-]
+# MARKER_COLS = [
+#     '0.C02.percentile99_class', # LGR5
+#     '0.C03.percentile99_class', # chroma
+#     '0.C04.percentile99_class', # aldoB
+#     '1.C02.percentile99_class', # Sero
+#     '1.C03.percentile99_class', # Lyz
+#     '1.C04.percentile99_class', # Agr2
+#     '2.C04.percentile99_class', # ki67
+# ]
 
-def extract_cell_attributes(nuclei_df_org):
-    nuclei_xyz = nuclei_df_org[["0.x_pos_pix", "0.y_pos_pix", "0.z_pos_pix_scaled"]].to_numpy(float)
-    markers = nuclei_df_org[MARKER_COLS].to_numpy()
-    markers_bin = (markers > 0.0)
+def extract_cell_attributes(nuclei_df_org, marker_cols, pos_cols=None):
+    if pos_cols is None:
+        pos_cols = ["0.x_pos_pix", "0.y_pos_pix", "0.z_pos_pix_scaled"]
+
+    nuclei_xyz = nuclei_df_org[pos_cols].to_numpy(float)
+    markers = nuclei_df_org[marker_cols].to_numpy()
+
+    markers_bin = (markers > 0.0) # binarize markers
+
     return nuclei_xyz, markers_bin
 
 
@@ -314,7 +319,7 @@ def filter_lgr5_coexpression(
 
 def center_and_rescale_mesh(
     mesh: OrganoidMesh,
-    nuclei_xyz: np.ndarray,
+    nuclei_xyz: np.ndarray = None,
     scale: float = 10.0,
     inplace: bool = True,
 ):
@@ -344,24 +349,22 @@ def center_and_rescale_mesh(
         The scaling factor used.
     """
     v = np.asarray(mesh.v)
-    nuclei_xyz = np.asarray(nuclei_xyz)
+    center = v.mean(axis=0)
 
-    # 1) Compute shared center across mesh + nuclei
-    all_points = np.vstack([v, nuclei_xyz])
-    center = all_points.mean(axis=0)
-
-    # 2) Center both
     v_centered = v - center
-    nuclei_centered = nuclei_xyz - center
-
-    # 3) Fixed rescale
-    v_new = v_centered / scale
-    nuclei_new = nuclei_centered / scale
+    v_scaled = v_centered / scale
 
     if inplace:
-        mesh.v = v_new
+        mesh.v = v_scaled
 
-    return v_new, nuclei_new
+    if nuclei_xyz is not None:
+        nuclei_xyz = np.asarray(nuclei_xyz)
+        nuclei_centered = nuclei_xyz - center
+        nuclei_scaled = nuclei_centered / scale
+
+        return v_scaled, nuclei_scaled
+
+    return v_scaled
 
 
 # ===================================================================

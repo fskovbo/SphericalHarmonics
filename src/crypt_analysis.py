@@ -52,7 +52,7 @@ Typical usage pattern:
 
 import numpy as np
 import heapq
-
+from src.cell_graph_functions import *
 
 
 
@@ -114,35 +114,6 @@ def crypt_neck_boundary_vertices(
             boundary[v] = True
 
     return np.sort(np.nonzero(boundary)[0])
-
-
-# def crypt_neck_boundary_cells(
-#     G,                # cell graph (networkx)
-#     crypt_cells,      # set[int]
-#     neck_patches,     # list[set[int]] (villus/neck regions)
-# ):
-#     """
-#     Return neck/villus cells that are at the interface with the given crypt,
-#     i.e. neck cells that either overlap or are 1-hop neighbors of crypt cells.
-
-#     Output
-#     ------
-#     neck_touching : set[int]
-#     """
-#     crypt_cells = set(crypt_cells)
-
-#     # 1-hop neighbors of crypt
-#     crypt_neighbors = set()
-#     for u in crypt_cells:
-#         crypt_neighbors.update(G.neighbors(u))
-
-#     neck_touching = set()
-#     for neck in neck_patches:
-#         neck = set(neck)
-#         if (neck & crypt_cells) or (neck & crypt_neighbors):
-#             neck_touching |= neck
-
-#     return neck_touching
 
 
 def crypt_neck_boundary_cells(
@@ -208,63 +179,6 @@ def crypt_neck_boundary_cells(
 # ============================================================
 # Crypt bottom selection (single scalar length L*)
 # ============================================================
-
-# def find_crypt_bottom(
-#     dist_mat,             # (N_cells, V) array, cell->vertex geodesic distances
-#     crypt_cells,          # iterable[int], crypt cell indices
-#     boundary_vertex_ids,  # (K,) array[int], boundary vertex indices
-#     candidates="all",     # "all" or int, subsample crypt candidates
-#     score="cv",           # "cv", "iqr_over_median", "range_over_median"
-#     length_stat="median", # "median" or "mean"
-# ):
-#     """
-#     Choose crypt bottom cell minimizing variation of distances to boundary vertices.
-
-#     Output
-#     ------
-#     bottom_cell_id : int
-#     L_star : float      (scalar crypt length)
-#     score_value : float (variation score)
-#     """
-#     dist_mat = np.asarray(dist_mat, dtype=float)
-#     crypt_idx = np.fromiter(crypt_cells, dtype=np.int64)
-#     boundary_vertex_ids = np.asarray(boundary_vertex_ids, dtype=np.int64)
-
-#     if crypt_idx.size == 0 or boundary_vertex_ids.size == 0:
-#         raise ValueError("crypt_cells or boundary_vertex_ids empty.")
-
-#     if isinstance(candidates, int) and crypt_idx.size > candidates:
-#         pick = np.linspace(0, crypt_idx.size - 1, candidates).astype(int)
-#         crypt_idx = crypt_idx[pick]
-
-#     D = dist_mat[crypt_idx][:, boundary_vertex_ids]
-#     D = np.where(np.isfinite(D), D, np.nan)
-
-#     if length_stat == "median":
-#         L = np.nanmedian(D, axis=1)
-#     elif length_stat == "mean":
-#         L = np.nanmean(D, axis=1)
-#     else:
-#         raise ValueError("length_stat must be 'median' or 'mean'.")
-
-#     L_safe = np.maximum(L, 1e-8)
-
-#     if score == "cv":
-#         s = np.nanstd(D, axis=1) / L_safe
-#     elif score == "iqr_over_median":
-#         q75 = np.nanpercentile(D, 75, axis=1)
-#         q25 = np.nanpercentile(D, 25, axis=1)
-#         s = (q75 - q25) / L_safe
-#     elif score == "range_over_median":
-#         s = (np.nanmax(D, axis=1) - np.nanmin(D, axis=1)) / L_safe
-#     else:
-#         raise ValueError("score must be 'cv', 'iqr_over_median', or 'range_over_median'.")
-
-#     frac_nan = np.mean(~np.isfinite(D), axis=1)
-#     s = np.where(frac_nan > 0.5, np.inf, s)
-
-#     best = int(np.nanargmin(s))
-#     return int(crypt_idx[best]), float(L_safe[best]), float(s[best])
 
 
 def find_crypt_bottom(
@@ -497,6 +411,117 @@ def find_crypt_bottom_lightweight(
         raise RuntimeError("No valid bottom candidate found (graph disconnected?)")
 
     return best_id, float(best_score)
+
+
+def compute_crypt_axis(
+    G,
+    mesh,
+    crypt_patches,
+    boundary_patches,
+    geodesic_fn,
+    geodesic_kwargs=None,
+):
+    """
+    Compute per-feature (crypt) distance fields from feature bottoms.
+
+    Inputs
+    ------
+    G : networkx.Graph
+        Cell graph. Nodes are cells (0..N-1). Must store:
+        - "proj_vertex" : projected mesh vertex id for each cell center
+    mesh : OrganoidMesh
+        Surface mesh with attributes:
+        - v : (V,3) vertices
+        - f : (F,3) faces
+    crypt_patches : list[set[int]]
+        Cell-id sets defining each feature (crypt).
+    boundary_patches : list[set[int]]
+        Cell-id sets defining boundary regions used to normalize length.
+    geodesic_fn : callable
+        Geodesic routine called as geodesic_fn(mesh, sources=[...], **kwargs)
+        Must return (S,V) or (V,) distances.
+    geodesic_kwargs : dict or None
+        Extra keyword args forwarded to geodesic_fn.
+
+    Returns
+    -------
+    draw_vertices_all : (K, V) float
+        Raw geodesic distances from each feature bottom to all vertices.
+        NaN for invalid features.
+    dnorm_vertices_all : (K, V) float
+        Normalized vertex distances (divided by boundary mean length).
+        NaN for invalid features.
+    L_mean_all : (K,) float
+        Mean boundary distance per feature (normalization length).
+        NaN for invalid features.
+    bottom_vertex_ids : (K,) int
+        Bottom projected vertex id per feature (-1 if invalid).
+    """
+    if geodesic_kwargs is None:
+        geodesic_kwargs = {}
+
+    K = len(crypt_patches)
+    V = mesh.v.shape[0]
+
+    bottom_cell_ids = np.full(K, -1, dtype=np.int32)
+    bottom_vertex_ids = np.full(K, -1, dtype=np.int32)
+    boundary_cells_list = [None] * K
+
+    # --- 1) find bottom + boundary per feature ---
+    for j, crypt_cells in enumerate(crypt_patches):
+        if not crypt_cells:
+            continue
+
+        boundary_cells = crypt_neck_boundary_cells(G, crypt_cells, boundary_patches)
+        if not boundary_cells:
+            continue
+
+        bottom_cell_id, _ = find_crypt_bottom_lightweight(
+            G=G,
+            mesh=mesh,
+            crypt_cells=crypt_cells,
+            neck_boundary_cells=boundary_cells,
+        )
+
+        bottom_cell_ids[j] = bottom_cell_id
+        bottom_vertex_ids[j] = G.nodes[bottom_cell_id]["proj_vertex"]
+        boundary_cells_list[j] = list(boundary_cells)
+
+    valid_js = np.where(bottom_vertex_ids >= 0)[0]
+
+    draw_vertices_all = np.full((K, V), np.nan, dtype=float)
+    dnorm_vertices_all = np.full((K, V), np.nan, dtype=float)
+    L_mean_all = np.full(K, np.nan, dtype=float)
+
+    if len(valid_js) == 0:
+        return draw_vertices_all, dnorm_vertices_all, L_mean_all, bottom_vertex_ids
+
+    # --- 2) geodesics from all valid bottoms ---
+    sources = [int(s) for s in bottom_vertex_ids[valid_js]]
+    D_multi = np.asarray(geodesic_fn(mesh, sources=sources, **geodesic_kwargs))
+    if D_multi.ndim == 1:
+        D_multi = D_multi[None, :]
+
+    # --- 3) normalize per feature ---
+    for r, j in enumerate(valid_js):
+        dist_vertices = D_multi[r]  # (V,)
+        draw_vertices_all[j] = dist_vertices
+
+        boundary_vertex_ids = graph_get(
+            G, "proj_vertex",
+            nodes=boundary_cells_list[j],
+            dtype=np.int32
+        )
+
+        L_mean = float(np.mean(dist_vertices[boundary_vertex_ids]))
+        L_mean = max(L_mean, 1e-12)
+
+        dnorm_vertices_all[j] = dist_vertices / L_mean
+        L_mean_all[j] = L_mean
+
+    return draw_vertices_all, dnorm_vertices_all, L_mean_all, bottom_vertex_ids
+
+
 
 
 
@@ -881,7 +906,7 @@ def vertex_areas(mesh):  # mesh with mass_matrix
 
 from scipy.signal import savgol_filter
 
-def adjust_cryptlength_by_circumference(
+def norm_dist_to_neckline(
     s,
     C,
     search_interval=(0.75, 1.25),
@@ -975,45 +1000,291 @@ def adjust_cryptlength_by_circumference(
     return 1.0
 
 
-def assign_crypts_by_neckline(dnorm_cells_per_crypt, s_thresh=1.0):
+
+def rescale_crypt_axis_by_circumference(
+    mesh,
+    dnorm_vertices,
+    bin_centers,
+    search_interval,
+    L_mean=None,
+    window_length=9,
+    polyorder=3,
+    min_prominence=0.05,
+):
     """
-    Assign each cell to at most one crypt using the rule:
-      - cell is eligible for crypt k if dnorm_cells_per_crypt[k, cell] < s_thresh
-      - if eligible for multiple crypts, assign to the crypt with minimal distance
+    Rescale feature axis so that the narrowest circumference occurs at s=1,
+    without recomputing circumference on the mesh after rescaling.
+
+    Inputs
+    ------
+    mesh : OrganoidMesh
+        Mesh used by crypt_circumference().
+    dnorm_vertices : (V,) or (K,V) array
+        Normalized distances at mesh vertices (per feature).
+    bin_centers : (B,) array
+        Canonical axis levels (used elsewhere; only axis exposed to caller).
+    search_interval : (lo, hi)
+        Interval for s_star search. Also defines internal axis stretching via hi.
+    L_mean : optional, scalar or (K,) array
+        Length proxy in physical units (per feature). Rescaled as L_mean * s_star.
+    window_length, polyorder, min_prominence :
+        Passed to norm_dist_to_neckline().
+
+    Returns (ALWAYS BATCHED)
+    -----------------------
+    CC_rescaled : (K, B) float
+        Circumference curves sampled on bin_centers after axis rescaling.
+    dnorm_vertices_rescaled : (K, V) float
+        Rescaled vertex distances: dnorm_vertices / s_star.
+    L_mean_rescaled : (K,) float or None
+        Rescaled length proxy: L_mean * s_star (or None if L_mean not given).
+    """
+    s = np.asarray(bin_centers, dtype=float)
+    if s.ndim != 1 or s.size == 0:
+        raise ValueError("bin_centers must be a non-empty 1D array")
+
+    lo, hi = float(search_interval[0]), float(search_interval[1])
+    if not (np.isfinite(lo) and np.isfinite(hi) and 0 < lo < hi):
+        raise ValueError("search_interval must be (lo, hi) with 0 < lo < hi")
+
+    dv = np.asarray(dnorm_vertices, dtype=float)
+    if dv.ndim == 1:
+        dv = dv[None, :]  # (1, V)
+    elif dv.ndim != 2:
+        raise ValueError("dnorm_vertices must be shape (V,) or (K,V)")
+
+    K, V = dv.shape
+
+    Lm = None
+    if L_mean is not None:
+        Lm = np.asarray(L_mean, dtype=float)
+        if Lm.ndim == 0:
+            Lm = np.full(K, float(Lm), dtype=float)
+        if Lm.ndim != 1 or Lm.shape[0] != K:
+            raise ValueError("L_mean must be scalar or shape (K,) matching dnorm_vertices' K")
+
+    # wide axis to avoid extrapolation for s_query = s * s_star
+    s_wide = np.linspace(0.0, float(s.max()) * hi, s.size)
+
+    CC_rescaled = np.full((K, s.size), np.nan, dtype=float)
+    s_star = np.ones(K, dtype=float)
+
+    for k in range(K):
+        CC0 = np.asarray(crypt_circumference(mesh=mesh, crypt_dist=dv[k], levels=s_wide), dtype=float)
+
+        ss = norm_dist_to_neckline(
+            s=s_wide,
+            C=CC0,
+            search_interval=(lo, hi),
+            window_length=window_length,
+            polyorder=polyorder,
+            min_prominence=min_prominence,
+        )
+        if not (np.isfinite(ss) and ss > 0):
+            ss = 1.0
+        s_star[k] = ss
+
+        s_query = np.clip(s * ss, s_wide[0], s_wide[-1])
+        CC_rescaled[k] = np.interp(s_query, s_wide, CC0)
+
+    dv_rescaled = dv / np.maximum(s_star[:, None], 1e-12)
+    Lm_rescaled = (Lm * s_star) if Lm is not None else None
+
+    return CC_rescaled, dv_rescaled, Lm_rescaled
+
+
+
+
+def assign_features_by_distance(dnorm_per_feature, s_thresh=1.0):
+    """
+    Assign each item (cell, vertex, etc.) to at most one feature using
+    a normalized-distance threshold and nearest-feature rule.
+
+    Rule
+    ----
+    An item i is eligible for feature k if:
+        dnorm_per_feature[k, i] < s_thresh
+
+    If multiple features qualify, the item is assigned to the feature
+    with the smallest distance.
+
+    This works identically whether “items” are:
+      - cells  → distances at cell centers
+      - vertices → distances at mesh vertices
+      - any other indexed objects
 
     Parameters
     ----------
-    dnorm_cells_per_crypt : array, shape (K, N_cells)
-        For each crypt k, the adjusted normalized distance s for each cell center.
-        (This should already include your division by s_star.)
+    dnorm_per_feature : array, shape (K, N_items)
+        Normalized distances from each feature k to each item i.
+        Example:
+            K = number of crypts/features
+            N_items = number of cells OR vertices
+        Distances should already include any axis rescaling (e.g. / s_star).
     s_thresh : float
         Threshold for membership (default 1.0).
 
     Returns
     -------
-    crypt_patches_new : list[set[int]]
-        Updated crypt patches as disjoint sets of cell ids (length K).
-    best_crypt : (N_cells,) int
-        Assigned crypt index per cell, or -1 if unassigned.
-    best_dist : (N_cells,) float
-        Best distance per cell (inf if unassigned).
+    feature_patches : list[set[int]]
+        Disjoint sets of assigned item indices, one set per feature (length K).
+    best_feature : (N_items,) int
+        Assigned feature index per item, or -1 if unassigned.
+    best_dist : (N_items,) float
+        Winning (smallest) distance per item, or +inf if unassigned.
     """
-    D = np.asarray(dnorm_cells_per_crypt, dtype=float)
+    D = np.asarray(dnorm_per_feature, dtype=float)
     if D.ndim != 2:
-        raise ValueError("dnorm_cells_per_crypt must be a 2D array of shape (K, N_cells).")
+        raise ValueError("dnorm_per_feature must have shape (K, N_items)")
 
-    K, N = D.shape
-    best_dist = np.full(N, np.inf, dtype=float)
-    best_crypt = np.full(N, -1, dtype=int)
+    K, N_items = D.shape
+
+    best_dist = np.full(N_items, np.inf, dtype=float)
+    best_feature = np.full(N_items, -1, dtype=int)
 
     for k in range(K):
         dk = D[k]
-        m = np.isfinite(dk) & (dk < float(s_thresh)) & (dk < best_dist)
-        best_dist[m] = dk[m]
-        best_crypt[m] = k
+        mask = np.isfinite(dk) & (dk < float(s_thresh)) & (dk < best_dist)
+        best_dist[mask] = dk[mask]
+        best_feature[mask] = k
 
-    crypt_patches_new = [set(np.where(best_crypt == k)[0].tolist()) for k in range(K)]
-    return crypt_patches_new, best_crypt, best_dist
+    feature_patches = [
+        set(np.where(best_feature == k)[0].tolist())
+        for k in range(K)
+    ]
+
+    return feature_patches, best_feature, best_dist
+
+
+
+from src.mesh_analysis import compute_geodesics_dijkstra
+from src.crypt_extraction import seed_regions_by_vocab, grow_crypts_toward_necks
+
+def segment_crypts_organoid(
+    G,                     # networkx cell-graph
+    mesh,                  # OrganoidMesh 
+    bin_centers,           # (B,) axis used for circumference curves + rescaling
+    crypt_vocab_idx,       # iterable[int] indices into vocab_encoding indicating "crypt" vocab bins
+    neck_vocab_idx=None,   # iterable[int] or None; indices indicating "neck" vocab bins
+    crypt_seed_thresh=0.2, # threshold on max(vocab_encoding[crypt_vocab_idx]) to seed crypt
+    neck_seed_thresh=0.5,  # threshold on max(vocab_encoding[neck_vocab_idx]) to seed neck
+    min_crypt_seed_size=10,# minimum connected-component size for crypt (and neck if enabled)
+    grow_steps=2,          # iterations for grow_crypts_toward_necks; set 0 to disable
+    geodesic_fn=compute_geodesics_dijkstra,  # geodesics(mesh, sources=[...], **geodesic_kwargs)
+    geodesic_kwargs=None,  # dict of kwargs forwarded to geodesic_fn
+    search_interval=(0.75, 1.25),  # allowed stretch range for finding min circumference
+    window_length=9,       # smoothing window for adjust_cryptlength_by_circumference
+    polyorder=3,           # polynomial order for adjust_cryptlength_by_circumference smoothing
+    min_prominence=0.05,   # peak prominence threshold for adjust_cryptlength_by_circumference
+    debug=False,           # if True, also return intermediate regions + internals
+):
+    """
+    One-stop organoid segmentation + crypt-axis computation.
+
+    Pipeline
+    --------
+    1) seed crypt/neck/villus regions from vocab_encoding
+    2) optionally grow crypts toward necks
+    3) compute crypt axis (raw + normalized) using geodesics from crypt bottoms
+    4) rescale axis by circumference so minimum aligns with s=1 on bin_centers
+    5) map vertex distances to cell-center distances
+    6) finalize crypt membership by neckline (s_thresh=1.0)
+    7) villus_final = all cells not assigned to any crypt
+
+    Returns
+    -------
+    crypts_final : list[set[int]]
+    villi_final  : list[set[int]]          # single patch: all non-crypt cells
+    dnorm_v      : (K, V) float            # rescaled normalized distances at vertices
+    draw_v       : (K, V) float            # raw geodesic distances at vertices
+    L_crypt       : (K,) float             # mean boundary distance (rescaled consistently with dnorm_v)
+    C            : (K, B) float            # circumference curves aligned to bin_centers
+    dbg          : dict (only if debug=True)
+    """
+    if geodesic_kwargs is None:
+        geodesic_kwargs = {}
+
+    # --- 1) seed regions ---
+    crypts_seed, necks_seed, villi_seed = seed_regions_by_vocab(
+        G,
+        crypt_vocab_idx=crypt_vocab_idx,
+        crypt_thresh=crypt_seed_thresh,
+        min_crypt_region_size=min_crypt_seed_size,
+        neck_vocab_idx=neck_vocab_idx,
+        neck_thresh=neck_seed_thresh,
+    )
+
+    # --- 2) optionally grow/refine ---
+    if grow_steps and grow_steps > 0:
+        crypts_grow, necks_grow, villi_grow = grow_crypts_toward_necks(
+            G,
+            crypt_regions=crypts_seed,
+            neck_regions=necks_seed,
+            N=grow_steps,
+            min_villus_region_size=1,  # fixed default
+        )
+    else:
+        crypts_grow, necks_grow, villi_grow = crypts_seed, necks_seed, villi_seed
+
+    boundary_patches = villi_grow + necks_grow
+
+    # --- 3) compute crypt axis (raw + normalized) ---
+    draw_v, dnorm_v, L_crypt, bottom_vertex_ids = compute_crypt_axis(
+        G=G,
+        mesh=mesh,
+        crypt_patches=crypts_grow,
+        boundary_patches=boundary_patches,
+        geodesic_fn=geodesic_fn,
+        geodesic_kwargs=geodesic_kwargs,
+    )
+
+    # --- 4) rescale by circumference (always returns (K,B), (K,V), (K,)) ---
+    Circ, dnorm_v, L_crypt = rescale_crypt_axis_by_circumference(
+        mesh=mesh,
+        dnorm_vertices=dnorm_v,
+        bin_centers=bin_centers,
+        search_interval=search_interval,
+        L_mean=L_crypt,
+        window_length=window_length,
+        polyorder=polyorder,
+        min_prominence=min_prominence,
+    )
+
+    # --- 5) vertex -> cell center distances ---
+    proj_vertex_ids = graph_get(G, "proj_vertex", dtype=np.int32)
+    dnorm_c = dnorm_v[:, proj_vertex_ids]  # (K, N_cells)
+
+    # --- 6) finalize crypt membership by neckline (default s_thresh=1.0) ---
+    crypts_final, best_feature, best_dist = assign_features_by_distance(dnorm_c)
+
+    # --- 7) villus = all cells not in any crypt (single patch) ---
+    N_cells = G.number_of_nodes()
+    crypt_union = set().union(*crypts_final) if crypts_final else set()
+    villus_cells = set(range(N_cells)) - crypt_union
+    villi_final = [villus_cells] if villus_cells else []
+
+    if not debug:
+        return crypts_final, villi_final, dnorm_v, draw_v, L_crypt, Circ
+
+    dbg = {
+        "crypts_seed": crypts_seed,
+        "necks_seed": necks_seed,
+        "villi_seed": villi_seed,
+        "crypts_grow": crypts_grow,
+        "necks_grow": necks_grow,
+        "villi_grow": villi_grow,
+        "boundary_patches": boundary_patches,
+        "bottom_vertex_ids": bottom_vertex_ids,
+        "best_feature": best_feature,  # (N_cells,)
+        "best_dist": best_dist,        # (N_cells,)
+    }
+
+    return crypts_final, villi_final, dnorm_v, draw_v, L_crypt, Circ, dbg
+
+
+
+
+
 
 
 # ===========================================================
@@ -1025,75 +1296,146 @@ def filter_crypt_by_markers(
     crypt_cells,
     pos_markers=None,     # list[int]
     neg_markers=None,     # list[int]
-    pos_min_cells=1,
-    neg_min_cells=1,
+    pos_min=1,            # threshold: count OR fraction (see mode)
+    neg_min=1,            # threshold: count OR fraction (see mode)
     roi_frac=None,        # e.g. 0.3 -> use cells with dist_bottom <= 0.3
-    dist_bottom=None,     # (N_cells,) normalized distances
+    dist_bottom=None,     # (N_cells,) or (K, N_cells) normalized distances
     require_all_pos=True,
+    mode="count",         # "count" (default) or "frac"/"percent"
 ):
     """
-    Return True if crypt passes marker filters, else False.
+    Filter crypt(s) by marker content.
 
-    Rules
-    -----
-    - Positive markers: require >= pos_min_cells in ROI
-    - Negative markers: reject if >= neg_min_cells in ROI
-    - ROI = all crypt cells, or if roi_frac is given:
-            cells with dist_bottom <= roi_frac
+    Supports either:
+      - mode="count": thresholds are absolute numbers of ROI cells
+      - mode="frac" / "percent": thresholds are fractions of ROI cells (0..1)
+
+    Inputs
+    ------
+    G : networkx.Graph
+        Node attribute "markers_bin" must be array-like of length M per cell.
+    crypt_cells : set[int] OR list[set[int]]
+        Cell-id indices belonging to one crypt or many crypts.
+    pos_markers, neg_markers : list[int] or None
+        Marker indices. Positive markers must be present in enough ROI cells;
+        negative markers reject if present in enough ROI cells.
+    pos_min : float or int
+        If mode="count": minimum number of ROI cells positive for each pos marker.
+        If mode="frac": minimum fraction of ROI cells positive for each pos marker.
+        (Better name: pos_min_count / pos_min_frac)
+    neg_min : float or int
+        If mode="count": reject if >= this many ROI cells positive for each neg marker.
+        If mode="frac": reject if >= this fraction of ROI cells positive for each neg marker.
+        (Better name: neg_min_count / neg_min_frac)
+    roi_frac : float or None
+        If given, restrict ROI to crypt cells with dist_bottom <= roi_frac.
+    dist_bottom : array or None
+        Normalized distance(s) used for ROI selection.
+        - single crypt: (N_cells,)
+        - many crypts: (K, N_cells) matching crypt order
+    require_all_pos : bool
+        If True: all pos_markers must pass. If False: at least one pos_marker must pass.
+    mode : str
+        "count" or "frac"/"percent"
+
+    Returns
+    -------
+    keep : bool OR np.ndarray of bool shape (K,)
+        Whether each crypt passes the filter.
     """
+    mode = str(mode).lower()
+    if mode in ("fraction", "fractions", "frac", "percent", "percentage"):
+        mode = "frac"
+    elif mode != "count":
+        raise ValueError("mode must be 'count' or 'frac'/'percent'")
 
-    if not crypt_cells:
-        return False
+    # ---- normalize crypt input ----
+    single = isinstance(crypt_cells, set)
+    crypt_list = [crypt_cells] if single else (list(crypt_cells) if crypt_cells is not None else [])
+    K = len(crypt_list)
+
+    if K == 0:
+        return False if single else np.zeros(0, dtype=bool)
 
     pos_markers = [] if pos_markers is None else [int(k) for k in pos_markers]
     neg_markers = [] if neg_markers is None else [int(k) for k in neg_markers]
 
-    crypt_idx = np.fromiter(set(crypt_cells), dtype=np.int64)
+    # Nothing to filter on => keep non-empty crypts
+    if not pos_markers and not neg_markers:
+        out = np.array([len(p) > 0 for p in crypt_list], dtype=bool)
+        return bool(out[0]) if single else out
 
-    # -----------------------------
-    # ROI selection
-    # -----------------------------
+    if mode == "frac":
+        # interpret thresholds as fractions
+        if not (0.0 <= float(pos_min) <= 1.0) or not (0.0 <= float(neg_min) <= 1.0):
+            raise ValueError("In mode='frac', pos_min and neg_min must be fractions in [0,1].")
+
+    # Pull markers once: (N_cells, M)
+    N = G.number_of_nodes()
+    markers = np.asarray([G.nodes[i]["markers_bin"] for i in range(N)])
+    # If markers are bool/0-1, sum(axis=0) gives counts.
+
+    # dist_bottom normalization: allow (N,) or (K,N)
+    Db = None
     if roi_frac is not None:
         if dist_bottom is None:
             raise ValueError("dist_bottom required when roi_frac is used.")
-        Db = np.asarray(dist_bottom, float)[crypt_idx]
-        roi_idx = crypt_idx[np.isfinite(Db) & (Db <= float(roi_frac))]
-        if roi_idx.size == 0:
-            return False
-    else:
-        roi_idx = crypt_idx
+        Db = np.asarray(dist_bottom, float)
+        if Db.ndim == 1:
+            Db = np.broadcast_to(Db[None, :], (K, Db.shape[0]))
+        if Db.ndim != 2 or Db.shape[0] != K or Db.shape[1] != N:
+            raise ValueError("dist_bottom must be shape (N_cells,) or (K, N_cells) matching crypt_cells.")
 
-    # -----------------------------
-    # Count marker-positive cells
-    # -----------------------------
-    needed = sorted(set(pos_markers + neg_markers))
-    counts = {k: 0 for k in needed}
+    keep = np.zeros(K, dtype=bool)
 
-    for cid in roi_idx:
-        mb = np.asarray(G.nodes[int(cid)]["markers_bin"], dtype=np.int64)
-        for k in needed:
-            counts[k] += int(mb[k])
+    for j, patch in enumerate(crypt_list):
+        if not patch:
+            continue
 
-    # -----------------------------
-    # Positive marker rule
-    # -----------------------------
-    if pos_markers:
-        ok = [(counts[k] >= pos_min_cells) for k in pos_markers]
-        if require_all_pos:
-            if not all(ok):
-                return False
+        idx = np.fromiter(patch, dtype=np.int64)
+        if idx.size == 0:
+            continue
+
+        # ROI selection
+        if roi_frac is not None:
+            dj = Db[j, idx]
+            roi = idx[np.isfinite(dj) & (dj <= float(roi_frac))]
+            if roi.size == 0:
+                continue
         else:
-            if not any(ok):
-                return False
+            roi = idx
 
-    # -----------------------------
-    # Negative marker rule
-    # -----------------------------
-    for k in neg_markers:
-        if counts[k] >= neg_min_cells:
-            return False
+        n_roi = int(roi.size)
 
-    return True
+        # counts per marker index among ROI cells
+        counts = markers[roi].sum(axis=0)  # (M,)
+
+        # Convert thresholds depending on mode
+        if mode == "count":
+            pos_thr = float(pos_min)
+            neg_thr = float(neg_min)
+        else:
+            # fraction thresholds -> convert to counts for consistent comparisons
+            pos_thr = float(pos_min) * n_roi
+            neg_thr = float(neg_min) * n_roi
+
+        # Positive marker rule
+        if pos_markers:
+            ok = [(counts[k] >= pos_thr) for k in pos_markers]
+            if require_all_pos:
+                if not all(ok):
+                    continue
+            else:
+                if not any(ok):
+                    continue
+
+        # Negative marker rule
+        if any(counts[k] >= neg_thr for k in neg_markers):
+            continue
+
+        keep[j] = True
+
+    return bool(keep[0]) if single else keep
 
 
 # ===========================================================
