@@ -4,7 +4,7 @@ import pandas as pd
 import igl
 
 from sklearn.neighbors import NearestNeighbors
-from src.OrganoidMesh import OrganoidMesh
+from mesh.OrganoidMesh import OrganoidMesh
 from src.mesh_analysis import compute_geodesics
 
 

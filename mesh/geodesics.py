@@ -1,54 +1,11 @@
 import numpy as np
 from scipy import sparse
 from scipy.sparse.linalg import splu
+from scipy.sparse.csgraph import dijkstra
 from tqdm import tqdm
 
 
-def compute_hks(mesh, t=[1, 5, 10], coeffs=True):
-    """
-    Compute Heat Kernel Signatures (HKS) for an OrganoidMesh.
-
-    The HKS characterizes local geometric structure over multiple diffusion
-    timescales and is invariant under isometric transformations of the mesh.
-    It is widely used in shape analysis and diffusion-based descriptors.
-
-    Parameters
-    ----------
-    mesh : OrganoidMesh
-        Mesh object with precomputed Laplacian eigendecomposition.
-        Must have attributes:
-            - eigvals : (K,) ndarray
-            - eigvecs : (V,K) ndarray
-            - mass_matrix : (V,V) sparse matrix
-    t : list of float, optional
-        Diffusion times for which to compute HKS.
-    coeffs : bool, optional
-        If True, return HKS projected into Laplacian eigenbasis.
-
-    Returns
-    -------
-    hks : (V, len(t)) ndarray
-        Heat kernel signatures at each vertex and time.
-    coeffs_hks : (K, len(t)) ndarray, optional
-        HKS coefficients in the Laplacian basis (if coeffs=True).
-    """
-    # Ensure the mesh has eigen-decomposition
-    mesh._ensure_eigendecomposition()
-
-    # Compute HKS
-    hks = np.array([
-        np.einsum("i,ji->j", np.exp(-mesh.eigvals * ti), mesh.eigvecs ** 2)
-        for ti in t
-    ]).T  # shape (V, len(t))
-
-    if coeffs:
-        coeffs_hks = mesh.eigvecs.T @ (mesh.mass_matrix @ hks)
-        return hks, coeffs_hks
-
-    return hks
-
-
-def compute_geodesics(mesh, t=None, sources=None):
+def compute_geodesics_heat(mesh, t=None, sources=None):
     """
     Compute approximate geodesic distances on a mesh using the Heat Method
     (Crane et al., 2013). Solves a pair of linear systems per source.
@@ -169,10 +126,6 @@ def build_G_face(v, f):
 
     return G_face
 
-
-
-from scipy import sparse
-from scipy.sparse.csgraph import dijkstra
 
 def compute_geodesics_dijkstra(mesh, sources=None):
     """

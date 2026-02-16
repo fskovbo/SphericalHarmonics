@@ -2,7 +2,7 @@ import glob
 import os
 import csv
 
-from src.OrganoidMesh import OrganoidMesh
+from mesh.OrganoidMesh import OrganoidMesh
 from src.mesh_analysis import *
 from src.nonlocal_correlations import *
 from src.cell_graph_functions import *

@@ -1,39 +1,8 @@
 import numpy as np
-import networkx as nx
-import plotly.graph_objects as go
-from src.mesh_analysis import compute_hks
-
-"""
-Cleaned utilities to detect necks and crypts on an organoid graph using HKS.
-- Short helpers appear first, then core methods in call order.
-- Diagnostics-only utilities were removed; verbose printing and plotting remain.
-"""
-
-# ===========================
-# Bag-of-features functionality for vocab-based segmentation
-# ===========================
-
-def compute_vocabulary_encoding(bag_of_features, mesh):
-
-    vocab = bag_of_features['vocab']
-    scaler = bag_of_features['scaler'].item()
-    sigma = bag_of_features['sigma']
-    ts = bag_of_features['ts']
-
-    hks = compute_hks(mesh, ts, coeffs=False)
-
-    # normalise
-    normalised_hks = (hks/np.mean(hks, axis=0, keepdims=True) - 1)
-    normalised_hks = scaler.transform(normalised_hks)
-
-    # convert to encoding
-    dist = np.linalg.norm(normalised_hks[:, np.newaxis, :]-vocab[np.newaxis, :, :], axis=2)
-    encoding = np.exp(-dist**2 / (2 * sigma**2))
-
-    return encoding, hks, normalised_hks, ts
+from collections import deque
 
 
-def seed_regions_by_vocab(
+def seed_features_by_vocab(
     G,
     crypt_vocab_idx,
     crypt_thresh=0.9,
@@ -134,7 +103,67 @@ def seed_regions_by_vocab(
 
 
 
-from collections import deque
+def assign_features_by_distance(dnorm_per_feature, s_thresh=1.0):
+    """
+    Assign each item (cell, vertex, etc.) to at most one feature using
+    a normalized-distance threshold and nearest-feature rule.
+
+    Rule
+    ----
+    An item i is eligible for feature k if:
+        dnorm_per_feature[k, i] < s_thresh
+
+    If multiple features qualify, the item is assigned to the feature
+    with the smallest distance.
+
+    This works identically whether “items” are:
+      - cells  → distances at cell centers
+      - vertices → distances at mesh vertices
+      - any other indexed objects
+
+    Parameters
+    ----------
+    dnorm_per_feature : array, shape (K, N_items)
+        Normalized distances from each feature k to each item i.
+        Example:
+            K = number of crypts/features
+            N_items = number of cells OR vertices
+        Distances should already include any axis rescaling (e.g. / s_star).
+    s_thresh : float
+        Threshold for membership (default 1.0).
+
+    Returns
+    -------
+    feature_patches : list[set[int]]
+        Disjoint sets of assigned item indices, one set per feature (length K).
+    best_feature : (N_items,) int
+        Assigned feature index per item, or -1 if unassigned.
+    best_dist : (N_items,) float
+        Winning (smallest) distance per item, or +inf if unassigned.
+    """
+    D = np.asarray(dnorm_per_feature, dtype=float)
+    if D.ndim != 2:
+        raise ValueError("dnorm_per_feature must have shape (K, N_items)")
+
+    K, N_items = D.shape
+
+    best_dist = np.full(N_items, np.inf, dtype=float)
+    best_feature = np.full(N_items, -1, dtype=int)
+
+    for k in range(K):
+        dk = D[k]
+        mask = np.isfinite(dk) & (dk < float(s_thresh)) & (dk < best_dist)
+        best_dist[mask] = dk[mask]
+        best_feature[mask] = k
+
+    feature_patches = [
+        set(np.where(best_feature == k)[0].tolist())
+        for k in range(K)
+    ]
+
+    return feature_patches, best_feature, best_dist
+
+
 
 def grow_crypts_toward_necks(
     G,

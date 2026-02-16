@@ -1,14 +1,13 @@
 import numpy as np
 import plotly.graph_objects as go
 import networkx as nx
-from typing import Iterable
 from plotly import colors as pc
 
 
 def plot_organoid_graph(
     centroids: np.ndarray,
     graph: nx.Graph,
-    node_values: np.ndarray | Iterable | None = None,
+    node_values: np.ndarray | None = None,
     *,
     node_size: int = 5,
     edge_width: float = 1.0,

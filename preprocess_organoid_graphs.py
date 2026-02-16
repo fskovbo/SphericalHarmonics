@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from src.OrganoidMesh import OrganoidMesh
+from mesh.OrganoidMesh import OrganoidMesh
 from src.cell_graph_functions import *
 from src.nuclei_to_mesh_projection import *
 from src.crypt_extraction import compute_vocabulary_encoding
