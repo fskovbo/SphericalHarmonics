@@ -1,5 +1,6 @@
 import numpy as np
 
+
 def graph_get(G, field, nodes=None, dtype=None):
     """
     Return a node attribute as a NumPy array.

@@ -1,7 +1,7 @@
 import numpy as np
 from voronoi import build_edge_adjacency, voronoi_on_mesh_multisource
 
-def assign_vertices_to_nuclei(mesh_v, mesh_f, nuclei_xyz, max_dist=None):
+def assign_vertices_to_nuclei(mesh, nuclei_xyz, max_dist=None):
     """
     Assign each mesh vertex to a nuclei by:
     1. Project nuclei to closest mesh vertex.
@@ -9,10 +9,8 @@ def assign_vertices_to_nuclei(mesh_v, mesh_f, nuclei_xyz, max_dist=None):
 
     Parameters
     ----------
-    mesh_v : (V, 3)
-        Mesh vertices
-    mesh_f : (F, 3)
-        Mesh faces (int)
+    mesh : OrganoidMesh
+        Contains vertices and faces as mesh.v and mesh.f
     nuclei_xyz : (N_cells, 3)
         Nucleus positions.
     max_dist : float (optional)
@@ -28,13 +26,12 @@ def assign_vertices_to_nuclei(mesh_v, mesh_f, nuclei_xyz, max_dist=None):
 
     proj_vertex_ids, proj_points = project_nuclei_to_mesh(
         nuclei_xyz,
-        mesh_v,
-        mesh_f,
+        mesh,
         resolve_duplicates=True, # if multiple nuclei are projected to the same vertex, shift them slightly
         max_dist=max_dist,
     )
 
-    nbrs, wts = build_edge_adjacency(mesh_v, mesh_f)
+    nbrs, wts = build_edge_adjacency(mesh.v, mesh.f)
     vertex_owner, dist = voronoi_on_mesh_multisource(nbrs, wts, proj_vertex_ids)
 
     return vertex_owner, proj_vertex_ids
@@ -58,8 +55,7 @@ def compute_face_normals_and_centroids(v, f):
 
 def project_nuclei_to_mesh(
     nuclei_xyz,
-    mesh_v,
-    mesh_f,
+    mesh,
     resolve_duplicates=False,
     dtype=np.float32,
     max_dist=None,
@@ -72,10 +68,8 @@ def project_nuclei_to_mesh(
     ----------
     nuclei_xyz : (N_cells, 3)
         Nucleus positions.
-    mesh_v : (V, 3)
-        Mesh vertices
-    mesh_f : (F, 3)
-        Mesh faces (int)
+    mesh : OrganoidMesh
+        Contains vertices and faces as mesh.v and mesh.f
     resolve_duplicates : bool
         If True, detect nuclei that project to the same vertex and
         shift all but one to neighboring vertices
@@ -94,8 +88,8 @@ def project_nuclei_to_mesh(
     """
     # --- Input normalization (do NOT overwrite caller's arrays)
     nuclei_xyz_in = np.asarray(nuclei_xyz)
-    mesh_v_in = np.asarray(mesh_v)
-    mesh_f_in = np.asarray(mesh_f, dtype=np.int64)
+    mesh_v_in = np.asarray(mesh.v)
+    mesh_f_in = np.asarray(mesh.f, dtype=np.int64)
 
     if nuclei_xyz_in.ndim != 2 or nuclei_xyz_in.shape[1] != 3:
         raise ValueError("nuclei_xyz must have shape (N_cells, 3)")

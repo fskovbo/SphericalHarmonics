@@ -1,7 +1,9 @@
+import os
 import igl
 import numpy as np
 import scipy.sparse as sparse
 from scipy.sparse.linalg import eigsh
+from transform import make_identity_transform, warn_if_already_transformed
 import vtk
 import pickle
 
@@ -35,7 +37,9 @@ class OrganoidMesh:
         self.eigvecs = None
         self.lmax = None
         self.coeffs_v = None       # spectral coefficients of vertex coords
-        self.transform_matrix = None
+        self.coord_transform = make_identity_transform()
+
+        label_uid = None
 
         if path is not None:
             self.load_mesh_from_file(path)
@@ -64,6 +68,7 @@ class OrganoidMesh:
                 faces[i, j] = cell.GetId(j)
         self.f = faces
 
+
     def _load_vtp_geometry(self, path):
         """Load vertices and faces from a VTP file. Ignore point data."""
         reader = vtk.vtkXMLPolyDataReader()
@@ -84,6 +89,7 @@ class OrganoidMesh:
                 faces[i, j] = cell.GetId(j)
         self.f = faces
 
+
     def load_mesh_from_file(self, path):
         """
         Load a mesh file (STL, OBJ, or VTP), geometry only.
@@ -98,7 +104,9 @@ class OrganoidMesh:
             self._load_vtp_geometry(path)
         else:
             raise ValueError(f"Unsupported file format: {path}")
+        
         return self
+
 
     def load_from_arrays(self, vertices, faces):
         """Load mesh geometry directly from arrays."""
@@ -106,32 +114,62 @@ class OrganoidMesh:
         self.f = np.asarray(faces, dtype=np.int64)
         return self
 
+
     # -------------------------------------------------------------------------
     # --- Optional scaling and alignment 
     # -------------------------------------------------------------------------
 
     def normalize_inplace(self, scale=10.0, center="mean"):
-        v = np.asarray(self.v)
-        if center == "mean":
-            c = v.mean(axis=0)
-        else:
+        v = np.asarray(self.v, dtype=float)
+
+        # warn if already transformed
+        warn_if_already_transformed(getattr(self, "coord_transform", None), obj_name="OrganoidMesh")
+
+        if center != "mean":
             raise ValueError("center must be 'mean'")
-        self.v = (v - c) / float(scale)
-        return c, float(scale)
+
+        c = v.mean(axis=0)
+        s = float(scale)
+
+        self.v = (v - c) / s
+
+        # record transform (rotation unchanged)
+        tr = getattr(self, "coord_transform", None) or make_identity_transform()
+        tr["center"] = np.asarray(c, float)
+        tr["scale"] = s
+        self.coord_transform = tr
+        return c, s
 
 
     def align_with_pca(self):
         """
-        Align mesh vertices using PCA for geometric normalization.
-        The mesh is rotated into principal component space.
+        Rotate mesh into PCA principal axes.
+        Assumes centering/scaling (if desired) is handled separately.
         """
         from sklearn.decomposition import PCA
 
+        v = np.asarray(self.v, dtype=float)
+
+        # warn if already transformed (because you're composing transforms)
+        warn_if_already_transformed(getattr(self, "coord_transform", None), obj_name="OrganoidMesh")
+
         pca = PCA(n_components=3)
-        pca.fit(self.v)
-        self.v = pca.transform(self.v)
-        self.transform_matrix = pca.components_.copy()
+        pca.fit(v)
+        R = pca.components_.copy()  # (3,3)
+
+        self.v = v @ R.T
+
+        tr = getattr(self, "coord_transform", None) or make_identity_transform()
+        tr["rotation"] = np.asarray(R, float)
+        self.coord_transform = tr
+
+        # set center to zeros in order to make transformation "visible"
+        if not np.isfinite(tr["center"]).all():
+            tr["center"] = np.zeros(3, float)
+            tr["scale"] = 1.0
+
         return self
+
 
     # -------------------------------------------------------------------------
     # --- Laplace–Beltrami operator and eigen decomposition
@@ -148,6 +186,7 @@ class OrganoidMesh:
         M = igl.massmatrix(v, f, igl.MASSMATRIX_TYPE_VORONOI)
         return sparse.csr_matrix(L), sparse.csr_matrix(M)
 
+
     def _eig_decomp(self, k=225, sigma=0):
         """
         Compute the first k Laplace–Beltrami eigenmodes using the cotangent operator.
@@ -157,6 +196,7 @@ class OrganoidMesh:
         self.mass_matrix = M
         self.eigvals, self.eigvecs = eigsh(L, k=k, M=M, sigma=sigma, which="LM")
         return self.eigvals, self.eigvecs, self.mass_matrix
+
 
     def _ensure_eigendecomposition(self, k=225, sigma=0):
         """
@@ -189,6 +229,7 @@ class OrganoidMesh:
         self.coeffs_v = self.eigvecs.T @ (self.mass_matrix @ self.v)
         return self.coeffs_v
 
+
     def reconstruct_from_coeffs(self, coeffs, lmax=15):
         """
         Reconstruct spatial fields from their Laplacian coefficients up to lmax.
@@ -204,6 +245,7 @@ class OrganoidMesh:
         if self.lmax is None or self.lmax < lmax:
             raise ValueError(f"Stored lmax={self.lmax} is smaller than requested lmax={lmax}.")
         return self.eigvecs[:, : int(lmax ** 2)] @ coeffs[: int(lmax ** 2), :]
+
 
     def compute_power_spectrum(self, coeffs, lmax=15):
         """
@@ -223,6 +265,7 @@ class OrganoidMesh:
             for i in range(lmax)
         ])
 
+
     def compute_reconstruction_quality(self, lmax=None):
         """
         Quantify mesh reconstruction quality via L2 error between
@@ -232,6 +275,7 @@ class OrganoidMesh:
             lmax = self.lmax
         v_recon = self.reconstruct_from_coeffs(self.coeffs_v, lmax=lmax)
         return np.sqrt(np.sum((self.v - v_recon) ** 2))
+
 
     def remove_lowest_modes(self, field=None, coeffs=None, l_remove=1, lmax=None):
         """
@@ -273,6 +317,7 @@ class OrganoidMesh:
         volume = np.abs(np.sum(tet_signed))
         return volume
 
+
     def vertex_areas(self, from_mass_matrix: bool = True) -> np.ndarray:
         """
         Compute per-vertex surface areas on the mesh.
@@ -292,6 +337,7 @@ class OrganoidMesh:
             for i in range(3):
                 vertex_areas[self.f[:, i]] += face_areas / 3.0
         return vertex_areas
+
 
     def face_areas(self) -> np.ndarray:
         """
@@ -319,7 +365,7 @@ class OrganoidMesh:
             eigvecs=self.eigvecs,
             mass_matrix=self.mass_matrix,
             coeffs_v=self.coeffs_v,
-            transform_matrix=self.transform_matrix,
+            coord_transform=self.coord_transform,
             lmax=self.lmax,
         )
         with open(path, "wb") as f:

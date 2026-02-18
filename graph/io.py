@@ -28,7 +28,6 @@ def load_cell_graph(path):
     return G
 
 
-
 def load_cell_graph_from_npz(data: np.lib.npyio.NpzFile) -> nx.Graph:
     """
     Reconstruct a NetworkX graph from edges and node count stored in an NPZ file.
