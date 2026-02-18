@@ -12,32 +12,32 @@ from src.mesh_analysis import compute_geodesics
 # Load nuclei data from table
 # ===================================================================
 
-# MARKER_BIN_COLS = [
-#     "LGR.bin", "CHROMA.bin", "CYCD.bin", "MUC.bin", "ALDOB.bin",
-#     "GLUC.bin", "CYCA.bin", "AGR.bin", "SERO.bin", "LYZ.bin",
-# ]
-
-# def extract_cell_attributes(nuclei_df_org):
-#     nuclei_xyz = nuclei_df_org[["0.x_pos_pix", "0.y_pos_pix", "0.z_pos_pix_scaled"]].to_numpy(float)
-#     markers_bin = nuclei_df_org[MARKER_BIN_COLS].to_numpy()
-#     return nuclei_xyz, markers_bin
-
-
-MARKER_COLS = [
-    '0.C02.percentile99_class', # LGR5
-    '0.C03.percentile99_class', # chroma
-    '0.C04.percentile99_class', # aldoB
-    '1.C02.percentile99_class', # Sero
-    '1.C03.percentile99_class', # Lyz
-    '1.C04.percentile99_class', # Agr2
-    '2.C04.percentile99_class', # ki67
+MARKER_BIN_COLS = [
+    "LGR.bin", "CHROMA.bin", "CYCD.bin", "MUC.bin", "ALDOB.bin",
+    "GLUC.bin", "CYCA.bin", "AGR.bin", "SERO.bin", "LYZ.bin",
 ]
 
 def extract_cell_attributes(nuclei_df_org):
     nuclei_xyz = nuclei_df_org[["0.x_pos_pix", "0.y_pos_pix", "0.z_pos_pix_scaled"]].to_numpy(float)
-    markers = nuclei_df_org[MARKER_COLS].to_numpy()
-    markers_bin = (markers > 0.0)
+    markers_bin = nuclei_df_org[MARKER_BIN_COLS].to_numpy()
     return nuclei_xyz, markers_bin
+
+
+# MARKER_COLS = [
+#     '0.C02.percentile99_class', # LGR5
+#     '0.C03.percentile99_class', # chroma
+#     '0.C04.percentile99_class', # aldoB
+#     '1.C02.percentile99_class', # Sero
+#     '1.C03.percentile99_class', # Lyz
+#     '1.C04.percentile99_class', # Agr2
+#     '2.C04.percentile99_class', # ki67
+# ]
+
+# def extract_cell_attributes(nuclei_df_org):
+#     nuclei_xyz = nuclei_df_org[["0.x_pos_pix", "0.y_pos_pix", "0.z_pos_pix_scaled"]].to_numpy(float)
+#     markers = nuclei_df_org[MARKER_COLS].to_numpy()
+#     markers_bin = (markers > 0.0)
+#     return nuclei_xyz, markers_bin
 
 
 # ===================================================================
